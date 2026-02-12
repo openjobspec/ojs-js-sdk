@@ -79,6 +79,7 @@ export class OJSWorker {
   private startedAt: number = 0;
   private shutdownPromise: Promise<void> | null = null;
   private shutdownResolve: (() => void) | null = null;
+  private graceTimerId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(workerConfig: OJSWorkerConfig) {
     this.transport =
@@ -243,6 +244,12 @@ export class OJSWorker {
         this.waitForActiveJobs(),
         this.gracePeriodTimeout(),
       ]);
+    }
+
+    // Clean up grace timer if it's still running
+    if (this.graceTimerId) {
+      clearTimeout(this.graceTimerId);
+      this.graceTimerId = null;
     }
 
     // Abort any remaining jobs after grace period
@@ -483,7 +490,7 @@ export class OJSWorker {
 
   private gracePeriodTimeout(): Promise<void> {
     return new Promise((resolve) => {
-      setTimeout(resolve, this.config.shutdownTimeout);
+      this.graceTimerId = setTimeout(resolve, this.config.shutdownTimeout);
     });
   }
 
@@ -493,6 +500,10 @@ export class OJSWorker {
       this.shutdownResolve &&
       (this.state === 'terminate' || this.state === 'quiet')
     ) {
+      if (this.graceTimerId) {
+        clearTimeout(this.graceTimerId);
+        this.graceTimerId = null;
+      }
       this.shutdownResolve();
       this.shutdownResolve = null;
       this.shutdownPromise = null;
