@@ -26,6 +26,8 @@ export interface TransportRequestOptions {
   headers?: Record<string, string>;
   signal?: AbortSignal;
   timeout?: number;
+  /** If true, the path is used as-is (no /ojs/v1 prefix). */
+  rawPath?: boolean;
 }
 
 /**

@@ -42,7 +42,9 @@ export class HttpTransport implements Transport {
   async request<T = unknown>(
     options: TransportRequestOptions,
   ): Promise<TransportResponse<T>> {
-    const url = `${this.baseUrl}${OJS_BASE_PATH}${options.path}`;
+    const url = options.rawPath
+      ? `${this.baseUrl}${options.path}`
+      : `${this.baseUrl}${OJS_BASE_PATH}${options.path}`;
     const timeout = options.timeout ?? this.defaultTimeout;
 
     // Set up timeout via AbortController
