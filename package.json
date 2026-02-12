@@ -1,0 +1,48 @@
+{
+  "name": "@openjobspec/sdk",
+  "version": "0.1.0",
+  "description": "Official Open Job Spec SDK for JavaScript and TypeScript",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openjobspec/ojs-js-sdk"
+  },
+  "keywords": [
+    "openjobspec",
+    "ojs",
+    "job",
+    "queue",
+    "worker",
+    "background-jobs",
+    "task-queue"
+  ]
+}
