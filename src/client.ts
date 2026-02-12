@@ -282,10 +282,10 @@ export class OJSClient {
    * Fetch the server's conformance manifest.
    */
   async manifest(): Promise<Record<string, unknown>> {
-    // The manifest endpoint is at /ojs/manifest (without /v1)
     const response = await this.transport.request<Record<string, unknown>>({
       method: 'GET',
-      path: '/../manifest',
+      path: '/ojs/manifest',
+      rawPath: true,
     });
     return response.body;
   }
