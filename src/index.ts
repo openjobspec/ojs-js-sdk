@@ -1,0 +1,112 @@
+/**
+ * @openjobspec/sdk — Official Open Job Spec SDK for JavaScript and TypeScript.
+ *
+ * Zero dependencies. TypeScript-first. Full type safety.
+ *
+ * @example
+ * ```ts
+ * import { OJSClient, OJSWorker, chain, group, batch } from '@openjobspec/sdk';
+ * ```
+ *
+ * @packageDocumentation
+ */
+
+// ---- Client (Producer) ----
+export { OJSClient } from './client.js';
+export type { OJSClientConfig } from './client.js';
+
+// ---- Worker (Consumer) ----
+export { OJSWorker } from './worker.js';
+export type { OJSWorkerConfig, WorkerState, JobHandler } from './worker.js';
+
+// ---- Job Types ----
+export type {
+  Job,
+  JobState,
+  JobSpec,
+  JobError,
+  JsonValue,
+  EnqueueOptions,
+  RetryOptions,
+  UniqueOptions,
+  RetryPolicy,
+  UniquePolicy,
+} from './job.js';
+export { TERMINAL_STATES, normalizeArgs } from './job.js';
+
+// ---- Workflow Builders ----
+export { chain, group, batch } from './workflow.js';
+export type {
+  ChainDefinition,
+  GroupDefinition,
+  BatchDefinition,
+  BatchCallbacks,
+  WorkflowDefinition,
+  WorkflowStatus,
+  WorkflowState,
+} from './workflow.js';
+
+// ---- Middleware ----
+export { MiddlewareChain } from './middleware.js';
+export type {
+  JobContext,
+  NextFunction,
+  ExecutionMiddleware,
+  EnqueueMiddleware,
+} from './middleware.js';
+
+// ---- Retry Helpers ----
+export {
+  DEFAULT_RETRY_POLICY,
+  computeBackoff,
+  mergeWithDefaults,
+  isNonRetryable,
+  parseDurationToMs,
+  msToIsoDuration,
+} from './retry.js';
+export type { BackoffStrategy } from './retry.js';
+
+// ---- Events ----
+export { OJSEventEmitter } from './events.js';
+export type {
+  OJSEvent,
+  OJSEventType,
+  OJSEventListener,
+  OJSEventDataMap,
+} from './events.js';
+
+// ---- Errors ----
+export {
+  OJSError,
+  OJSValidationError,
+  OJSNotFoundError,
+  OJSDuplicateError,
+  OJSConflictError,
+  OJSServerError,
+  OJSConnectionError,
+  OJSTimeoutError,
+} from './errors.js';
+
+// ---- Queue Operations ----
+export { QueueOperations } from './queue.js';
+export type { QueueInfo, QueueStats, DeadLetterJob } from './queue.js';
+
+// ---- Transport ----
+export { HttpTransport } from './transport/http.js';
+export type {
+  Transport,
+  TransportConfig,
+  TransportRequestOptions,
+  TransportResponse,
+} from './transport/types.js';
+
+// ---- Validation ----
+export {
+  validateJobType,
+  validateQueueName,
+  validateArgs,
+  validateUUIDv7,
+  validateTimestamp,
+  validateDuration,
+  validateEnqueueRequest,
+} from './validation/schemas.js';
