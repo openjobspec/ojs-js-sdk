@@ -16,6 +16,7 @@ import {
   type JobContext,
 } from './middleware.js';
 import { OJSEventEmitter } from './events.js';
+import { OJSTimeoutError } from './errors.js';
 
 /** Worker lifecycle state per the OJS Worker Protocol. */
 export type WorkerState = 'running' | 'quiet' | 'terminate' | 'terminated';
@@ -332,6 +333,7 @@ export class OJSWorker {
   private processJob(job: Job): void {
     const controller = new AbortController();
     this.activeJobs.set(job.id, controller);
+    const processingStartedAt = Date.now();
 
     // Find handler
     const handler = this.handlers.get(job.type);
@@ -345,6 +347,14 @@ export class OJSWorker {
         this.activeJobs.delete(job.id);
       });
       return;
+    }
+
+    // Set up job-level timeout if configured
+    let jobTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    if (job.timeout && job.timeout > 0) {
+      jobTimeoutId = setTimeout(() => {
+        controller.abort(new OJSTimeoutError(job.id, job.timeout!));
+      }, job.timeout);
     }
 
     // Build the job context
@@ -376,7 +386,7 @@ export class OJSWorker {
             {
               job_type: job.type,
               queue: job.queue,
-              duration_ms: Date.now() - (new Date(job.started_at ?? '').getTime() || Date.now()),
+              duration_ms: Date.now() - processingStartedAt,
               attempt: ctx.attempt,
               result: result as JsonValue,
             },
@@ -385,11 +395,15 @@ export class OJSWorker {
         );
       })
       .catch(async (error: Error) => {
+        const isTimeout = error instanceof OJSTimeoutError ||
+          controller.signal.reason instanceof OJSTimeoutError;
         const jobError: JobError = {
-          code: 'handler_error',
+          code: isTimeout ? 'timeout' : 'handler_error',
           message: error.message,
           retryable: true,
-          details: { stack: error.stack },
+          details: isTimeout
+            ? { job_id: job.id, timeout_ms: job.timeout }
+            : { stack: error.stack },
         };
 
         await this.nack(job.id, jobError);
@@ -409,6 +423,7 @@ export class OJSWorker {
         );
       })
       .finally(() => {
+        if (jobTimeoutId) clearTimeout(jobTimeoutId);
         this.activeJobs.delete(job.id);
         this.resolveShutdownIfIdle();
       });
