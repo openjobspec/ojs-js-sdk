@@ -26,6 +26,17 @@ export class OJSError extends Error {
     this.details = options?.details;
     this.requestId = options?.requestId;
   }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      name: this.name,
+      code: this.code,
+      message: this.message,
+      retryable: this.retryable,
+      details: this.details,
+      requestId: this.requestId,
+    };
+  }
 }
 
 /** The server returned a validation error (400). */
