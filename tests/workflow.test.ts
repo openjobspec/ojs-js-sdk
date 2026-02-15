@@ -159,5 +159,21 @@ describe('Workflow Builders', () => {
       expect(steps[1].type).toBe('group');
       expect(steps[1].jobs).toBeDefined();
     });
+
+    it('should treat a JobSpec with type "chain" as a job, not a workflow', () => {
+      const wf = chain(
+        { type: 'chain', args: { input: 'data' } },
+        { type: 'process.result', args: [] },
+      );
+
+      const wire = toWireWorkflow(wf);
+      const steps = wire.steps as Array<Record<string, unknown>>;
+
+      expect(steps[0].type).toBe('chain');
+      expect(steps[0].args).toEqual([{ input: 'data' }]);
+      // Should NOT have 'steps' or 'jobs' — it's a job, not a workflow
+      expect(steps[0].steps).toBeUndefined();
+      expect(steps[0].jobs).toBeUndefined();
+    });
   });
 });

@@ -172,11 +172,10 @@ export function toWireWorkflow(
 function toWireStep(
   step: JobSpec | ChainDefinition | GroupDefinition | BatchDefinition,
 ): Record<string, unknown> {
-  if ('type' in step && (step.type === 'chain' || step.type === 'group' || step.type === 'batch')) {
-    // Nested workflow primitive
-    if ('steps' in step || 'jobs' in step || 'callbacks' in step) {
-      return toWireWorkflow(step as WorkflowDefinition);
-    }
+  // Discriminate workflow primitives by their structural properties,
+  // not by the 'type' field value, since a JobSpec could have type: 'chain'.
+  if ('steps' in step || 'jobs' in step || 'callbacks' in step) {
+    return toWireWorkflow(step as WorkflowDefinition);
   }
 
   // Job spec
