@@ -4,6 +4,8 @@
  * Provides execution middleware that instruments job processing with
  * OpenTelemetry traces and metrics, following the OJS Observability spec.
  *
+ * Requires `@opentelemetry/api` as an optional peer dependency.
+ *
  * @example
  * ```typescript
  * import { OJSWorker } from '@openjobspec/sdk';
@@ -21,48 +23,30 @@
  * @module
  */
 
-import type { ExecutionMiddleware, NextFunction, JobContext } from './middleware';
+import type { ExecutionMiddleware, NextFunction, JobContext } from './middleware.js';
+import type {
+  Tracer,
+  Span,
+  TracerProvider,
+  Counter,
+  Histogram,
+} from '@opentelemetry/api';
 
-/**
- * OpenTelemetry API interfaces (peer dependency).
- * Users must install `@opentelemetry/api` separately.
- */
-interface OTelTracer {
-  startActiveSpan<T>(name: string, options: Record<string, unknown>, fn: (span: OTelSpan) => T): T;
-}
-
-interface OTelSpan {
-  setAttribute(key: string, value: string | number | boolean): void;
-  setStatus(status: { code: number; message?: string }): void;
-  recordException(error: Error | string): void;
-  end(): void;
-}
-
-interface OTelCounter {
-  add(value: number, attributes?: Record<string, string>): void;
-}
-
-interface OTelHistogram {
-  record(value: number, attributes?: Record<string, string>): void;
-}
-
-interface OTelTracerProvider {
-  getTracer(name: string, version?: string): OTelTracer;
-}
-
-interface OTelMeterProvider {
+// Re-export MeterProvider-related types locally since @opentelemetry/api
+// splits meter types across modules.
+interface MeterProvider {
   getMeter(name: string, version?: string): {
-    createCounter(name: string, options?: Record<string, string>): OTelCounter;
-    createHistogram(name: string, options?: Record<string, string>): OTelHistogram;
+    createCounter(name: string, options?: Record<string, string>): Counter;
+    createHistogram(name: string, options?: Record<string, string>): Histogram;
   };
 }
 
 /** Configuration for OpenTelemetry middleware. */
 export interface OpenTelemetryConfig {
-  /** OpenTelemetry tracer provider. If omitted, uses global provider. */
-  tracerProvider?: OTelTracerProvider;
-  /** OpenTelemetry meter provider. If omitted, uses global provider. */
-  meterProvider?: OTelMeterProvider;
+  /** OpenTelemetry tracer provider. If omitted, tracing is disabled. */
+  tracerProvider?: TracerProvider;
+  /** OpenTelemetry meter provider. If omitted, metrics are disabled. */
+  meterProvider?: MeterProvider;
 }
 
 const INSTRUMENTATION_NAME = '@openjobspec/sdk';
@@ -77,12 +61,12 @@ const INSTRUMENTATION_NAME = '@openjobspec/sdk';
  * - `ojs.job.duration` (histogram, seconds)
  */
 export function openTelemetryMiddleware(config: OpenTelemetryConfig = {}): ExecutionMiddleware {
-  const tracer = config.tracerProvider?.getTracer(INSTRUMENTATION_NAME);
+  const tracer: Tracer | undefined = config.tracerProvider?.getTracer(INSTRUMENTATION_NAME);
   const meter = config.meterProvider?.getMeter(INSTRUMENTATION_NAME);
 
-  const jobsCompleted = meter?.createCounter('ojs.job.completed', { description: 'Jobs completed successfully' });
-  const jobsFailed = meter?.createCounter('ojs.job.failed', { description: 'Jobs that failed' });
-  const jobDuration = meter?.createHistogram('ojs.job.duration', { description: 'Job execution duration in seconds' });
+  const jobsCompleted: Counter | undefined = meter?.createCounter('ojs.job.completed', { description: 'Jobs completed successfully' });
+  const jobsFailed: Counter | undefined = meter?.createCounter('ojs.job.failed', { description: 'Jobs that failed' });
+  const jobDuration: Histogram | undefined = meter?.createHistogram('ojs.job.duration', { description: 'Job execution duration in seconds' });
 
   return async (ctx: JobContext, next: NextFunction): Promise<unknown> => {
     const metricAttrs = {
@@ -116,30 +100,36 @@ export function openTelemetryMiddleware(config: OpenTelemetryConfig = {}): Execu
           'ojs.job.type': ctx.job.type,
           'ojs.job.id': ctx.job.id,
           'ojs.job.queue': ctx.job.queue,
-          'ojs.job.attempt': ctx.job.attempt,
+          'ojs.job.attempt': ctx.job.attempt ?? 1,
         },
       },
-      async (span: OTelSpan) => {
+      (span: Span) => {
         const start = performance.now();
-        try {
-          const result = await next();
-          const duration = (performance.now() - start) / 1000;
 
-          span.setStatus({ code: 1 }); // SpanStatusCode.OK
-          jobDuration?.record(duration, metricAttrs);
-          jobsCompleted?.add(1, metricAttrs);
-          span.end();
-          return result;
-        } catch (error) {
+        const finish = (error?: Error) => {
           const duration = (performance.now() - start) / 1000;
-
-          span.recordException(error instanceof Error ? error : String(error));
-          span.setStatus({ code: 2, message: String(error) }); // SpanStatusCode.ERROR
           jobDuration?.record(duration, metricAttrs);
-          jobsFailed?.add(1, metricAttrs);
+
+          if (error) {
+            span.recordException(error);
+            span.setStatus({ code: 2, message: String(error) }); // SpanStatusCode.ERROR
+            jobsFailed?.add(1, metricAttrs);
+          } else {
+            span.setStatus({ code: 1 }); // SpanStatusCode.OK
+            jobsCompleted?.add(1, metricAttrs);
+          }
           span.end();
-          throw error;
-        }
+        };
+
+        return next()
+          .then((result) => {
+            finish();
+            return result;
+          })
+          .catch((error) => {
+            finish(error instanceof Error ? error : new Error(String(error)));
+            throw error;
+          });
       },
     );
   };
