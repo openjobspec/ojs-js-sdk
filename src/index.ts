@@ -110,3 +110,7 @@ export {
   validateDuration,
   validateEnqueueRequest,
 } from './validation/schemas.js';
+
+// OpenTelemetry
+export { openTelemetryMiddleware } from './otel.js';
+export type { OpenTelemetryConfig } from './otel.js';
