@@ -15,7 +15,7 @@
  *   });
  */
 
-import type { JsonValue, EnqueueOptions, JobState } from './job.js';
+import type { Job, JsonValue, EnqueueOptions, JobState } from './job.js';
 
 // In-memory store for fake mode
 interface FakeStore {
@@ -23,7 +23,8 @@ interface FakeStore {
   performed: FakeJob[];
 }
 
-interface FakeJob {
+/** A fake job record stored by the testing module. */
+export interface FakeJob {
   id: string;
   type: string;
   queue: string;
@@ -35,7 +36,8 @@ interface FakeJob {
   created_at: string;
 }
 
-interface MatchOptions {
+/** Options for matching jobs in assertion helpers. */
+export interface MatchOptions {
   args?: JsonValue[];
   queue?: string;
   meta?: Record<string, JsonValue>;
@@ -92,11 +94,11 @@ export function registerHandler(type: string, handler: (job: FakeJob) => Promise
  * Record a job enqueue (called by OJSClient when in fake/inline mode).
  * @internal
  */
-export function _recordEnqueue(
+export async function _recordEnqueue(
   type: string,
   args: JsonValue[],
   options: EnqueueOptions = {},
-): FakeJob {
+): Promise<FakeJob> {
   if (!store) throw new Error('OJS testing: not in test mode. Call testing.fake() or testing.inline() first.');
 
   const job: FakeJob = {
@@ -119,11 +121,7 @@ export function _recordEnqueue(
       job.state = 'active';
       job.attempt = 1;
       try {
-        const result = handler(job);
-        if (result instanceof Promise) {
-          // For inline mode, we execute synchronously so we note it's async
-          // Users should await the enqueue call
-        }
+        await handler(job);
         job.state = 'completed';
       } catch {
         job.state = 'discarded';
@@ -133,6 +131,24 @@ export function _recordEnqueue(
   }
 
   return job;
+}
+
+/**
+ * Convert a FakeJob to a Job envelope for OJSClient return values.
+ * @internal
+ */
+export function _toJob(fakeJob: FakeJob): Job {
+  return {
+    specversion: '1.0',
+    id: fakeJob.id,
+    type: fakeJob.type,
+    queue: fakeJob.queue,
+    args: fakeJob.args,
+    meta: fakeJob.meta,
+    state: fakeJob.state,
+    attempt: fakeJob.attempt,
+    created_at: fakeJob.created_at,
+  };
 }
 
 /** Assert that at least one job of the given type was enqueued. */
@@ -210,7 +226,7 @@ export function clearAll(): void {
 }
 
 /** Process all enqueued jobs in fake mode using registered handlers. */
-export function drain(options?: { maxJobs?: number }): void {
+export async function drain(options?: { maxJobs?: number }): Promise<void> {
   if (!store) throw new Error('OJS testing: not in test mode.');
 
   const max = options?.maxJobs ?? Infinity;
@@ -226,7 +242,7 @@ export function drain(options?: { maxJobs?: number }): void {
 
     if (handler) {
       try {
-        handler(job);
+        await handler(job);
         job.state = 'completed';
       } catch {
         job.state = 'discarded';

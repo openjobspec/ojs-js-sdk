@@ -27,6 +27,7 @@ import type {
   WorkflowStatus,
 } from './workflow.js';
 import { toWireWorkflow } from './workflow.js';
+import { isTestMode, _recordEnqueue, _toJob } from './testing.js';
 
 /** Configuration options for OJSClient. */
 export interface OJSClientConfig {
@@ -70,6 +71,7 @@ export class OJSClient {
   /**
    * Enqueue a single job.
    *
+   * @typeParam T - The type of the job arguments. Must be JSON-serializable.
    * @param type - The dot-namespaced job type (e.g., 'email.send').
    * @param args - The job arguments. Objects/primitives are wrapped in an array for the wire format.
    * @param options - Optional enqueue options (queue, retry, delay, etc.).
@@ -77,15 +79,27 @@ export class OJSClient {
    *
    * @example
    * ```ts
+   * // Untyped (default)
    * const job = await client.enqueue('email.send', { to: 'user@example.com' });
+   *
+   * // Typed args for compile-time safety
+   * interface EmailPayload { to: string; subject: string }
+   * const job = await client.enqueue<EmailPayload>('email.send', { to: 'a@b.com', subject: 'Hi' });
    * ```
    */
-  async enqueue(
+  async enqueue<T extends JsonValue = JsonValue>(
     type: string,
-    args: JsonValue | JsonValue[] = [],
+    args: T | T[] = [] as unknown as T,
     options?: EnqueueOptions,
   ): Promise<Job> {
     const wireArgs = normalizeArgs(args);
+
+    // In test mode, record the job in memory instead of sending HTTP
+    if (isTestMode()) {
+      const fakeJob = await _recordEnqueue(type, wireArgs, options);
+      return _toJob(fakeJob);
+    }
+
     const wireOptions = toWireOptions(options);
 
     // Build the job envelope for middleware
@@ -152,6 +166,17 @@ export class OJSClient {
    * ```
    */
   async enqueueBatch(specs: JobSpec[]): Promise<Job[]> {
+    // In test mode, record each job in memory
+    if (isTestMode()) {
+      const jobs: Job[] = [];
+      for (const spec of specs) {
+        const wireArgs = normalizeArgs(spec.args ?? []);
+        const fakeJob = await _recordEnqueue(spec.type, wireArgs, spec.options);
+        jobs.push(_toJob(fakeJob));
+      }
+      return jobs;
+    }
+
     const wireJobs = specs.map((spec) => {
       const wireArgs = normalizeArgs(spec.args ?? []);
       const wireOptions = toWireOptions(spec.options);

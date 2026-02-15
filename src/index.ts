@@ -114,3 +114,8 @@ export {
 // OpenTelemetry
 export { openTelemetryMiddleware } from './otel.js';
 export type { OpenTelemetryConfig } from './otel.js';
+
+// ---- Testing Utilities ----
+import * as testing from './testing.js';
+export { testing };
+export type { FakeJob, MatchOptions } from './testing.js';
