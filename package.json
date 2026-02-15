@@ -4,13 +4,19 @@
   "description": "Official Open Job Spec SDK for JavaScript and TypeScript",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
     }
   },
   "files": [
@@ -19,19 +25,31 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node -e \"fs=require('fs');pkg=JSON.parse(fs.readFileSync('package.json'));fs.writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "tsc --noEmit",
+    "size": "size-limit",
     "docs": "typedoc --out docs src/index.ts",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@size-limit/file": "^12.0.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "size-limit": "^12.0.0",
     "typedoc": "^0.27.0",
     "typescript": "^5.4.0",
     "vitest": "^2.0.0"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=18.0.0"
@@ -48,5 +66,11 @@
     "worker",
     "background-jobs",
     "task-queue"
+  ],
+  "size-limit": [
+    {
+      "path": "dist/esm/index.js",
+      "limit": "15 kB"
+    }
   ]
 }
