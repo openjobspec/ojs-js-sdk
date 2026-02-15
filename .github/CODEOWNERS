@@ -1,0 +1,5 @@
+# Default owners for all files
+* @josedab
+
+# CI and tooling
+.github/ @josedab
