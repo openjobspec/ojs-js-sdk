@@ -299,5 +299,278 @@ describe('OJSWorker', () => {
 
       expect(completedEvents.length).toBeGreaterThanOrEqual(1);
     });
+
+    it('should emit job.failed event on error', async () => {
+      const testJob = createTestJob({ type: 'fail.event' });
+      let fetchCallCount = 0;
+
+      mock.setFetchHandler((options) => {
+        if (options.path === '/workers/fetch') {
+          fetchCallCount++;
+          if (fetchCallCount === 1) {
+            return { status: 200, headers: {}, body: { jobs: [testJob] } };
+          }
+          return { status: 200, headers: {}, body: { jobs: [] } };
+        }
+        return { status: 200, headers: {}, body: {} };
+      });
+
+      worker.register('fail.event', async () => {
+        throw new Error('handler error');
+      });
+
+      const failedEvents: unknown[] = [];
+      worker.events.on('job.failed', (event) => {
+        failedEvents.push(event);
+      });
+
+      await worker.start();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await worker.stop();
+
+      expect(failedEvents.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should emit worker.started event', async () => {
+      const startedEvents: unknown[] = [];
+      worker.events.on('worker.started', (event) => {
+        startedEvents.push(event);
+      });
+
+      await worker.start();
+      expect(startedEvents).toHaveLength(1);
+      await worker.stop();
+    });
+
+    it('should emit worker.stopped event', async () => {
+      const stoppedEvents: unknown[] = [];
+      worker.events.on('worker.stopped', (event) => {
+        stoppedEvents.push(event);
+      });
+
+      await worker.start();
+      await worker.stop();
+
+      expect(stoppedEvents).toHaveLength(1);
+    });
+  });
+
+  describe('job timeout', () => {
+    it('should timeout a job that takes too long', async () => {
+      const testJob = createTestJob({
+        type: 'slow.job',
+        timeout: 50, // 50ms timeout
+      });
+      let fetchCallCount = 0;
+
+      mock.setFetchHandler((options) => {
+        if (options.path === '/workers/fetch') {
+          fetchCallCount++;
+          if (fetchCallCount === 1) {
+            return { status: 200, headers: {}, body: { jobs: [testJob] } };
+          }
+          return { status: 200, headers: {}, body: { jobs: [] } };
+        }
+        return { status: 200, headers: {}, body: {} };
+      });
+
+      worker.register('slow.job', async (ctx) => {
+        // Run longer than the timeout
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, 500);
+          ctx.signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(ctx.signal.reason);
+          });
+        });
+      });
+
+      await worker.start();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await worker.stop();
+
+      const nackRequest = mock.requests.find((r) => r.path === '/workers/nack');
+      expect(nackRequest).toBeDefined();
+      const body = nackRequest!.body as { error: { code: string } };
+      expect(body.error.code).toBe('timeout');
+    });
+  });
+
+  describe('heartbeat', () => {
+    it('should send heartbeats when configured', async () => {
+      // Create a worker with short heartbeat interval
+      const heartbeatWorker = new OJSWorker({
+        url: 'http://localhost:8080',
+        queues: ['default'],
+        concurrency: 5,
+        pollInterval: 50,
+        heartbeatInterval: 50,
+        transport: mock.transport,
+      });
+
+      await heartbeatWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await heartbeatWorker.stop();
+
+      const heartbeatRequests = mock.requests.filter((r) => r.path === '/workers/heartbeat');
+      expect(heartbeatRequests.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should transition to quiet when server directs', async () => {
+      let heartbeatCount = 0;
+      mock.setFetchHandler((options) => {
+        if (options.path === '/workers/heartbeat') {
+          heartbeatCount++;
+          if (heartbeatCount >= 2) {
+            return { status: 200, headers: {}, body: { state: 'quiet' } };
+          }
+          return { status: 200, headers: {}, body: { state: 'running' } };
+        }
+        if (options.path === '/workers/fetch') {
+          return { status: 200, headers: {}, body: { jobs: [] } };
+        }
+        return { status: 200, headers: {}, body: {} };
+      });
+
+      const heartbeatWorker = new OJSWorker({
+        url: 'http://localhost:8080',
+        queues: ['default'],
+        concurrency: 5,
+        pollInterval: 50,
+        heartbeatInterval: 50,
+        transport: mock.transport,
+      });
+
+      await heartbeatWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      // Worker should have transitioned to quiet
+      expect(heartbeatWorker.currentState).toBe('quiet');
+      await heartbeatWorker.stop();
+    });
+
+    it('should transition to terminate when server directs', async () => {
+      let heartbeatCount = 0;
+      mock.setFetchHandler((options) => {
+        if (options.path === '/workers/heartbeat') {
+          heartbeatCount++;
+          if (heartbeatCount >= 2) {
+            return { status: 200, headers: {}, body: { state: 'terminate' } };
+          }
+          return { status: 200, headers: {}, body: { state: 'running' } };
+        }
+        if (options.path === '/workers/fetch') {
+          return { status: 200, headers: {}, body: { jobs: [] } };
+        }
+        return { status: 200, headers: {}, body: {} };
+      });
+
+      const heartbeatWorker = new OJSWorker({
+        url: 'http://localhost:8080',
+        queues: ['default'],
+        concurrency: 5,
+        pollInterval: 50,
+        heartbeatInterval: 50,
+        transport: mock.transport,
+      });
+
+      await heartbeatWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      // Worker should have terminated
+      expect(heartbeatWorker.currentState).toBe('terminated');
+    });
+  });
+
+  describe('stop()', () => {
+    it('should be idempotent when already terminated', async () => {
+      // Worker starts in terminated state
+      await worker.stop(); // Should not throw
+      expect(worker.currentState).toBe('terminated');
+    });
+  });
+
+  describe('concurrency', () => {
+    it('should request only available slots in fetch', async () => {
+      mock.setFetchHandler((options) => {
+        if (options.path === '/workers/fetch') {
+          return { status: 200, headers: {}, body: { jobs: [] } };
+        }
+        return { status: 200, headers: {}, body: {} };
+      });
+
+      await worker.start();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await worker.stop();
+
+      const fetchRequests = mock.requests.filter((r) => r.path === '/workers/fetch');
+      expect(fetchRequests.length).toBeGreaterThanOrEqual(1);
+      const body = fetchRequests[0].body as { count: number };
+      expect(body.count).toBeLessThanOrEqual(5); // concurrency is 5
+    });
+  });
+
+  describe('activeJobCount', () => {
+    it('should reflect active job count', async () => {
+      expect(worker.activeJobCount).toBe(0);
+    });
+  });
+
+  describe('worker labels', () => {
+    it('should include labels in heartbeat', async () => {
+      const labeledWorker = new OJSWorker({
+        url: 'http://localhost:8080',
+        queues: ['default'],
+        pollInterval: 50,
+        heartbeatInterval: 50,
+        labels: ['gpu', 'high-memory'],
+        transport: mock.transport,
+      });
+
+      await labeledWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await labeledWorker.stop();
+
+      const heartbeatRequest = mock.requests.find((r) => r.path === '/workers/heartbeat');
+      if (heartbeatRequest) {
+        const body = heartbeatRequest.body as { labels: string[] };
+        expect(body.labels).toEqual(['gpu', 'high-memory']);
+      }
+    });
+  });
+
+  describe('poll error backoff', () => {
+    it('should use exponential backoff on consecutive poll errors', async () => {
+      let errorCount = 0;
+
+      mock.setFetchHandler((options) => {
+        if (options.path === '/workers/fetch') {
+          errorCount++;
+          throw new Error('connection refused');
+        }
+        if (options.path === '/workers/heartbeat') {
+          return { status: 200, headers: {}, body: { state: 'running' } };
+        }
+        return { status: 200, headers: {}, body: {} };
+      });
+
+      const worker = new OJSWorker({
+        url: 'http://localhost:8080',
+        transport: mock.transport,
+        pollInterval: 50,
+        heartbeatInterval: 600_000,
+      });
+
+      await worker.start();
+      // Wait enough for a few poll errors
+      await new Promise((r) => setTimeout(r, 500));
+      await worker.stop();
+
+      // Should have attempted multiple polls but with increasing delay
+      // With 50ms base, errors should slow down (50*2=100, 50*4=200, etc.)
+      // In 500ms we should see fewer errors than if it were a fixed interval
+      expect(errorCount).toBeGreaterThan(1);
+      expect(errorCount).toBeLessThan(10); // Without backoff at 100ms fixed, would be ~5; with 50ms base, even more
+    });
   });
 });

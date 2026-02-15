@@ -99,6 +99,32 @@ describe('OJSClient', () => {
         client.enqueue('INVALID TYPE!', {}),
       ).rejects.toThrow();
     });
+
+    it('should accept typed args via generic parameter', async () => {
+      interface EmailPayload { to: string; subject: string }
+
+      mock.mockResponse('POST', '/jobs', {
+        job: { id: 'test', type: 'email.send', queue: 'default', args: [{ to: 'a@b.com', subject: 'Hi' }], specversion: '1.0' },
+      }, 201);
+
+      const job = await client.enqueue<EmailPayload>('email.send', { to: 'a@b.com', subject: 'Hi' });
+      expect(job.type).toBe('email.send');
+
+      const body = mock.requests[0].body as Record<string, unknown>;
+      expect(body.args).toEqual([{ to: 'a@b.com', subject: 'Hi' }]);
+    });
+
+    it('should accept typed array args via generic parameter', async () => {
+      mock.mockResponse('POST', '/jobs', {
+        job: { id: 'test', type: 'process.items', queue: 'default', args: ['item1', 'item2'], specversion: '1.0' },
+      }, 201);
+
+      const job = await client.enqueue<string>('process.items', ['item1', 'item2']);
+      expect(job.type).toBe('process.items');
+
+      const body = mock.requests[0].body as Record<string, unknown>;
+      expect(body.args).toEqual(['item1', 'item2']);
+    });
   });
 
   describe('enqueueBatch', () => {
@@ -211,6 +237,95 @@ describe('OJSClient', () => {
 
       expect(status.state).toBe('pending');
       expect(status.metadata.job_count).toBe(3);
+    });
+  });
+
+  describe('getWorkflow', () => {
+    it('should fetch workflow status', async () => {
+      const workflowId = 'wf_123';
+      mock.mockResponse('GET', `/workflows/${workflowId}`, {
+        id: workflowId,
+        type: 'chain',
+        state: 'running',
+        metadata: { job_count: 3, completed_count: 1, failed_count: 0, created_at: new Date().toISOString() },
+      });
+
+      const status = await client.getWorkflow(workflowId);
+      expect(status.state).toBe('running');
+      expect(status.id).toBe(workflowId);
+    });
+  });
+
+  describe('cancelWorkflow', () => {
+    it('should cancel a workflow', async () => {
+      const workflowId = 'wf_123';
+      mock.mockResponse('DELETE', `/workflows/${workflowId}`, {});
+
+      await client.cancelWorkflow(workflowId);
+
+      expect(mock.requests).toHaveLength(1);
+      expect(mock.requests[0].method).toBe('DELETE');
+      expect(mock.requests[0].path).toBe(`/workflows/${workflowId}`);
+    });
+  });
+
+  describe('health', () => {
+    it('should check server health', async () => {
+      mock.mockResponse('GET', '/health', {
+        status: 'ok',
+        version: '1.0.0',
+        backend: { type: 'redis', status: 'connected' },
+      });
+
+      const health = await client.health();
+      expect(health.status).toBe('ok');
+      expect(health.version).toBe('1.0.0');
+      expect(health.backend?.type).toBe('redis');
+    });
+  });
+
+  describe('manifest', () => {
+    it('should fetch the conformance manifest', async () => {
+      // manifest uses rawPath, so the mock key is based on the full path
+      // We need a special mock for rawPath requests
+      const mockTransport = {
+        ...mock.transport,
+        async request<T>(options: import('../src/transport/types.js').TransportRequestOptions): Promise<import('../src/transport/types.js').TransportResponse<T>> {
+          mock.requests.push(options);
+          if (options.path === '/ojs/manifest') {
+            return { status: 200, headers: {}, body: { specversion: '1.0.0-rc.1', layers: [1, 2, 3] } as T };
+          }
+          return { status: 200, headers: {}, body: {} as T };
+        },
+      };
+
+      const manifestClient = new OJSClient({ url: 'http://localhost:8080', transport: mockTransport });
+      const manifest = await manifestClient.manifest();
+      expect(manifest.specversion).toBe('1.0.0-rc.1');
+    });
+  });
+
+  describe('middleware accessor', () => {
+    it('should expose the enqueue middleware chain', () => {
+      expect(client.middleware).toBeDefined();
+      expect(client.middleware.length).toBe(0);
+
+      client.useEnqueue('test', async (job, next) => next(job));
+      expect(client.middleware.length).toBe(1);
+      expect(client.middleware.has('test')).toBe(true);
+    });
+  });
+
+  describe('enqueue with meta', () => {
+    it('should include meta in the wire format', async () => {
+      mock.mockResponse('POST', '/jobs', {
+        job: { id: 'test', type: 'email.send', queue: 'default', args: [], specversion: '1.0', meta: { trace_id: 'abc' } },
+      }, 201);
+
+      await client.enqueue('email.send', {}, { meta: { trace_id: 'abc' } });
+
+      const body = mock.requests[0].body as Record<string, unknown>;
+      expect(body.meta).toEqual({ trace_id: 'abc' });
     });
   });
 });
