@@ -78,6 +78,7 @@ export class OJSWorker {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private jobsCompleted = 0;
   private startedAt: number = 0;
+  private consecutivePollErrors = 0;
   private shutdownPromise: Promise<void> | null = null;
   private shutdownResolve: (() => void) | null = null;
   private graceTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -187,6 +188,7 @@ export class OJSWorker {
     this.state = 'running';
     this.startedAt = Date.now();
     this.jobsCompleted = 0;
+    this.consecutivePollErrors = 0;
 
     // Emit worker.started event
     await this.events.emit(
@@ -289,17 +291,21 @@ export class OJSWorker {
       .then((fetched) => {
         if (this.state !== 'running') return;
 
+        this.consecutivePollErrors = 0;
         // If we got jobs, poll immediately for more. Otherwise, back off.
         const delay = fetched > 0 ? 0 : this.config.pollInterval;
         this.pollTimer = setTimeout(() => this.poll(), delay);
       })
       .catch(() => {
-        // On error, back off before retrying
+        // Exponential backoff on consecutive errors, capped at 30s
         if (this.state === 'running') {
-          this.pollTimer = setTimeout(
-            () => this.poll(),
-            this.config.pollInterval * 2,
+          this.consecutivePollErrors++;
+          const maxBackoff = 30_000;
+          const delay = Math.min(
+            this.config.pollInterval * Math.pow(2, this.consecutivePollErrors),
+            maxBackoff,
           );
+          this.pollTimer = setTimeout(() => this.poll(), delay);
         }
       });
   }
