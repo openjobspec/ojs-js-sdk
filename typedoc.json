@@ -1,0 +1,15 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "out": "docs",
+  "name": "@openjobspec/sdk",
+  "readme": "README.md",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "includeVersion": true,
+  "plugin": [],
+  "navigationLinks": {
+    "OJS Website": "https://openjobspec.org",
+    "GitHub": "https://github.com/openjobspec/ojs-js-sdk"
+  }
+}
