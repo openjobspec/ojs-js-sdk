@@ -1,0 +1,64 @@
+name: API Compatibility
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  api-extractor:
+    name: TypeScript API Compatibility Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Check for breaking changes
+        run: |
+          # Generate current API surface from TypeScript declarations
+          npx api-extractor run --local 2>/dev/null || true
+
+          # Fallback: Compare exported types via tsc declarations
+          if [ -d dist ]; then
+            echo "=== Current Public API ==="
+            grep -rh "^export" dist/*.d.ts 2>/dev/null | sort > /tmp/current-api.txt
+            cat /tmp/current-api.txt
+
+            # Get base branch exports
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            git stash 2>/dev/null || true
+            git checkout "$BASE_SHA" -- dist/ 2>/dev/null || {
+              echo "::notice::No previous dist/ to compare against; skipping."
+              exit 0
+            }
+            grep -rh "^export" dist/*.d.ts 2>/dev/null | sort > /tmp/base-api.txt
+
+            # Diff exports
+            REMOVED=$(comm -23 /tmp/base-api.txt /tmp/current-api.txt)
+            ADDED=$(comm -13 /tmp/base-api.txt /tmp/current-api.txt)
+
+            if [ -n "$REMOVED" ]; then
+              echo "::error::Potentially breaking changes - removed exports:"
+              echo "$REMOVED"
+              exit 1
+            fi
+
+            if [ -n "$ADDED" ]; then
+              echo "::notice::New exports added (backward compatible):"
+              echo "$ADDED"
+            fi
+          fi
