@@ -8,8 +8,10 @@ import {
   OJSServerError,
   OJSConnectionError,
   OJSTimeoutError,
+  OJSRateLimitError,
   parseErrorResponse,
 } from '../src/errors.js';
+import type { RateLimitInfo } from '../src/errors.js';
 
 describe('OJSError', () => {
   it('sets message, code, and defaults', () => {
@@ -145,6 +147,34 @@ describe('OJSTimeoutError', () => {
   });
 });
 
+describe('OJSRateLimitError', () => {
+  it('sets retryAfter and marks retryable', () => {
+    const err = new OJSRateLimitError('too many requests', { retryAfter: 60, requestId: 'req-6' });
+    expect(err.name).toBe('OJSRateLimitError');
+    expect(err.code).toBe('rate_limited');
+    expect(err.retryable).toBe(true);
+    expect(err.retryAfter).toBe(60);
+    expect(err.requestId).toBe('req-6');
+    expect(err).toBeInstanceOf(OJSError);
+  });
+
+  it('handles missing retryAfter', () => {
+    const err = new OJSRateLimitError('slow down');
+    expect(err.retryAfter).toBeUndefined();
+    expect(err.rateLimit).toBeUndefined();
+    expect(err.retryable).toBe(true);
+  });
+
+  it('stores rateLimit info', () => {
+    const rateLimit: RateLimitInfo = { limit: 100, remaining: 0, reset: 1700000000, retryAfter: 60 };
+    const err = new OJSRateLimitError('too many requests', { retryAfter: 60, rateLimit });
+    expect(err.rateLimit).toEqual(rateLimit);
+    expect(err.rateLimit?.limit).toBe(100);
+    expect(err.rateLimit?.remaining).toBe(0);
+    expect(err.rateLimit?.reset).toBe(1700000000);
+  });
+});
+
 describe('parseErrorResponse', () => {
   it('returns OJSValidationError for 400', () => {
     const err = parseErrorResponse(400, {
@@ -201,12 +231,47 @@ describe('parseErrorResponse', () => {
     expect((err as OJSServerError).statusCode).toBe(503);
   });
 
-  it('returns generic OJSError for unknown status codes', () => {
+  it('returns OJSRateLimitError for 429', () => {
     const err = parseErrorResponse(429, {
       error: { code: 'rate_limited', message: 'too many requests', retryable: true },
     });
-    expect(err).toBeInstanceOf(OJSError);
+    expect(err).toBeInstanceOf(OJSRateLimitError);
     expect(err.code).toBe('rate_limited');
+    expect(err.retryable).toBe(true);
+    expect((err as OJSRateLimitError).retryAfter).toBeUndefined();
+  });
+
+  it('returns OJSRateLimitError with retryAfter from headers', () => {
+    const headers = new Headers({ 'Retry-After': '30' });
+    const err = parseErrorResponse(
+      429,
+      { error: { code: 'rate_limited', message: 'too many requests' } },
+      headers,
+    );
+    expect(err).toBeInstanceOf(OJSRateLimitError);
+    expect((err as OJSRateLimitError).retryAfter).toBe(30);
+  });
+
+  it('returns OJSRateLimitError with full rateLimit info from headers', () => {
+    const headers = new Headers({
+      'Retry-After': '60',
+      'X-RateLimit-Limit': '1000',
+      'X-RateLimit-Remaining': '0',
+      'X-RateLimit-Reset': '1700000000',
+    });
+    const err = parseErrorResponse(
+      429,
+      { error: { code: 'rate_limited', message: 'too many requests' } },
+      headers,
+    );
+    expect(err).toBeInstanceOf(OJSRateLimitError);
+    const rlErr = err as OJSRateLimitError;
+    expect(rlErr.retryAfter).toBe(60);
+    expect(rlErr.rateLimit).toBeDefined();
+    expect(rlErr.rateLimit?.limit).toBe(1000);
+    expect(rlErr.rateLimit?.remaining).toBe(0);
+    expect(rlErr.rateLimit?.reset).toBe(1700000000);
+    expect(rlErr.rateLimit?.retryAfter).toBe(60);
   });
 
   it('handles missing error body', () => {

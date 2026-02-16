@@ -83,6 +83,7 @@ export class HttpTransport implements Transport {
         throw parseErrorResponse(
           response.status,
           body as Record<string, unknown>,
+          response.headers,
         );
       }
 

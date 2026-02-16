@@ -85,7 +85,9 @@ export {
   OJSServerError,
   OJSConnectionError,
   OJSTimeoutError,
+  OJSRateLimitError,
 } from './errors.js';
+export type { RateLimitInfo } from './errors.js';
 
 // ---- Queue Operations ----
 export { QueueOperations } from './queue.js';

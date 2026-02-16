@@ -133,6 +133,45 @@ export class OJSTimeoutError extends OJSError {
   }
 }
 
+/** Rate limit metadata extracted from response headers. */
+export interface RateLimitInfo {
+  /** Maximum requests allowed per window (X-RateLimit-Limit). */
+  limit?: number;
+  /** Remaining requests in current window (X-RateLimit-Remaining). */
+  remaining?: number;
+  /** Unix timestamp when window resets (X-RateLimit-Reset). */
+  reset?: number;
+  /** Seconds to wait before retrying (Retry-After). */
+  retryAfter?: number;
+}
+
+/** The server rate-limited the request (429). */
+export class OJSRateLimitError extends OJSError {
+  /** Seconds to wait before retrying, if provided by the server. */
+  readonly retryAfter?: number;
+  /** Rate limit metadata from response headers. */
+  readonly rateLimit?: RateLimitInfo;
+
+  constructor(
+    message: string,
+    options?: {
+      retryAfter?: number;
+      rateLimit?: RateLimitInfo;
+      details?: Record<string, unknown>;
+      requestId?: string;
+    },
+  ) {
+    super(message, 'rate_limited', {
+      retryable: true,
+      details: options?.details,
+      requestId: options?.requestId,
+    });
+    this.name = 'OJSRateLimitError';
+    this.retryAfter = options?.retryAfter;
+    this.rateLimit = options?.rateLimit;
+  }
+}
+
 /**
  * Parse an OJS error response body into the appropriate error class.
  */
@@ -147,6 +186,7 @@ export function parseErrorResponse(
       request_id?: string;
     };
   },
+  headers?: Headers,
 ): OJSError {
   const err = body.error;
   const message = err?.message ?? `HTTP ${status}`;
@@ -168,6 +208,29 @@ export function parseErrorResponse(
       return new OJSDuplicateError(message, details, requestId);
     }
     return new OJSConflictError(message, details, requestId);
+  }
+  if (status === 429) {
+    let retryAfter: number | undefined;
+    let rateLimit: RateLimitInfo | undefined;
+    if (headers) {
+      const raw = headers.get('Retry-After');
+      if (raw !== null) {
+        const parsed = parseFloat(raw);
+        if (!isNaN(parsed)) {
+          retryAfter = parsed;
+        }
+      }
+      const limitRaw = headers.get('X-RateLimit-Limit');
+      const remainingRaw = headers.get('X-RateLimit-Remaining');
+      const resetRaw = headers.get('X-RateLimit-Reset');
+      if (limitRaw !== null || remainingRaw !== null || resetRaw !== null || retryAfter !== undefined) {
+        rateLimit = { retryAfter };
+        if (limitRaw !== null) { const v = parseInt(limitRaw, 10); if (!isNaN(v)) rateLimit.limit = v; }
+        if (remainingRaw !== null) { const v = parseInt(remainingRaw, 10); if (!isNaN(v)) rateLimit.remaining = v; }
+        if (resetRaw !== null) { const v = parseInt(resetRaw, 10); if (!isNaN(v)) rateLimit.reset = v; }
+      }
+    }
+    return new OJSRateLimitError(message, { retryAfter, rateLimit, details, requestId });
   }
   if (status >= 500) {
     return new OJSServerError(message, status, requestId);

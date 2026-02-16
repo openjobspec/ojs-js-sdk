@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HttpTransport, fetchManifest } from '../src/transport/http.js';
-import { OJSConnectionError, OJSValidationError, OJSNotFoundError, OJSServerError } from '../src/errors.js';
+import { OJSConnectionError, OJSValidationError, OJSNotFoundError, OJSServerError, OJSRateLimitError } from '../src/errors.js';
 
 // Helper to create a mock Response
 function mockResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -206,6 +206,32 @@ describe('HttpTransport', () => {
       await expect(
         transport.request({ method: 'GET', path: '/jobs/123' }),
       ).rejects.toBeInstanceOf(OJSNotFoundError);
+    });
+
+    it('should throw OJSRateLimitError on 429 with Retry-After header', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: { code: 'rate_limited', message: 'Slow down' } }),
+          {
+            status: 429,
+            headers: {
+              'Content-Type': 'application/openjobspec+json',
+              'Retry-After': '120',
+            },
+          },
+        ),
+      );
+
+      const transport = new HttpTransport({ url: 'http://localhost:8080' });
+
+      await expect(
+        transport.request({ method: 'POST', path: '/jobs', body: {} }),
+      ).rejects.toSatisfy((err: OJSRateLimitError) => {
+        expect(err).toBeInstanceOf(OJSRateLimitError);
+        expect(err.retryAfter).toBe(120);
+        expect(err.retryable).toBe(true);
+        return true;
+      });
     });
 
     it('should throw OJSServerError on 500', async () => {
