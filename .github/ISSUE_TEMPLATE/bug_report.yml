@@ -1,18 +1,18 @@
 name: Bug Report
-description: Report a bug in @openjobspec/sdk
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug! Please fill in the details below.
+        Thank you for taking the time to report a bug.
 
   - type: textarea
     id: description
     attributes:
-      label: Bug Description
-      description: A clear description of the bug.
-      placeholder: What happened?
+      label: Description
+      description: A clear and concise description of what the bug is.
     validations:
       required: true
 
@@ -20,13 +20,11 @@ body:
     id: reproduction
     attributes:
       label: Steps to Reproduce
-      description: Minimal code or steps to reproduce the issue.
+      description: Steps to reproduce the behavior.
       placeholder: |
-        ```ts
-        import { OJSClient } from '@openjobspec/sdk';
-        const client = new OJSClient({ url: '...' });
-        // ...
-        ```
+        1. Set up...
+        2. Run...
+        3. See error...
     validations:
       required: true
 
@@ -34,7 +32,7 @@ body:
     id: expected
     attributes:
       label: Expected Behavior
-      description: What did you expect to happen?
+      description: What you expected to happen.
     validations:
       required: true
 
@@ -42,34 +40,42 @@ body:
     id: actual
     attributes:
       label: Actual Behavior
-      description: What actually happened?
+      description: What actually happened. Include error messages or logs if applicable.
     validations:
       required: true
 
   - type: input
     id: version
     attributes:
-      label: SDK Version
-      placeholder: "0.1.0"
+      label: Version
+      description: What version are you using?
+      placeholder: "e.g., v1.0.0"
     validations:
       required: true
 
   - type: dropdown
-    id: runtime
+    id: backend
     attributes:
-      label: Runtime
+      label: Backend
+      description: Which OJS backend are you using?
       options:
-        - Node.js 18
-        - Node.js 20
-        - Node.js 22
-        - Deno
-        - Bun
-        - Other
+        - Redis
+        - PostgreSQL
+        - Kafka
+        - NATS
+        - SQS
+        - Other / N/A
     validations:
-      required: true
+      required: false
 
   - type: textarea
-    id: additional
+    id: environment
     attributes:
-      label: Additional Context
-      description: Any other relevant information (logs, screenshots, etc.).
+      label: Environment
+      description: Any relevant environment details (OS, language version, etc.).
+      placeholder: |
+        - OS: macOS 14.0
+        - Go: 1.22.0
+        - Redis: 7.2
+    validations:
+      required: false
