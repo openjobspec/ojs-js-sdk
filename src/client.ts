@@ -19,6 +19,8 @@ import {
   type EnqueueMiddleware,
 } from './middleware.js';
 import { QueueOperations } from './queue.js';
+import { CronOperations } from './cron.js';
+import { SchemaOperations } from './schema.js';
 import { OJSEventEmitter } from './events.js';
 import { validateEnqueueRequest } from './validation/schemas.js';
 import { OJSValidationError } from './errors.js';
@@ -53,6 +55,12 @@ export class OJSClient {
   /** Queue management operations. */
   readonly queues: QueueOperations;
 
+  /** Cron job management operations. */
+  readonly cron: CronOperations;
+
+  /** Schema management operations. */
+  readonly schemas: SchemaOperations;
+
   constructor(config: OJSClientConfig) {
     this.transport =
       config.transport ??
@@ -64,6 +72,8 @@ export class OJSClient {
       });
 
     this.queues = new QueueOperations(this.transport);
+    this.cron = new CronOperations(this.transport);
+    this.schemas = new SchemaOperations(this.transport);
   }
 
   // ---- Enqueue ----

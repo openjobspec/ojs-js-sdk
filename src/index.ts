@@ -91,6 +91,23 @@ export {
 export { QueueOperations } from './queue.js';
 export type { QueueInfo, QueueStats, DeadLetterJob } from './queue.js';
 
+// ---- Cron Operations ----
+export { CronOperations } from './cron.js';
+export type {
+  CronJobInfo,
+  CronJobOptions,
+  CronJobDefinition,
+  CronListOptions,
+} from './cron.js';
+
+// ---- Schema Operations ----
+export { SchemaOperations } from './schema.js';
+export type {
+  SchemaInfo,
+  SchemaDefinition,
+  SchemaListOptions,
+} from './schema.js';
+
 // ---- Transport ----
 export { HttpTransport } from './transport/http.js';
 export type {
