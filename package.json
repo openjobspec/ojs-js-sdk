@@ -39,6 +39,7 @@
     "@opentelemetry/api": "^1.9.0",
     "@size-limit/file": "^12.0.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "fast-check": "^4.5.3",
     "size-limit": "^12.0.0",
     "typedoc": "^0.27.0",
     "typescript": "^5.4.0",
