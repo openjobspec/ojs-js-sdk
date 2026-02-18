@@ -14,21 +14,6 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@60d8f0d1f1f8c8d07ef53bd027032705d414ec28 # v3
-        with:
-          languages: javascript-typescript
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@60d8f0d1f1f8c8d07ef53bd027032705d414ec28 # v3
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@60d8f0d1f1f8c8d07ef53bd027032705d414ec28 # v3
-        with:
-          category: /language:javascript-typescript
+    uses: openjobspec/.github/.github/workflows/codeql.yml@main
+    with:
+      languages: javascript-typescript
