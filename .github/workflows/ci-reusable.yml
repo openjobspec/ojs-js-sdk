@@ -1,0 +1,21 @@
+name: CI (Reusable)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18', '20', '22']
+    uses: openjobspec/.github/.github/workflows/ci-node.yml@main
+    with:
+      node-version: ${{ matrix.node-version }}
+      working-directory: .
