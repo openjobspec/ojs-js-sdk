@@ -74,5 +74,9 @@
       "path": "dist/esm/index.js",
       "limit": "15 kB"
     }
-  ]
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
 }
