@@ -1,7 +1,7 @@
 /**
  * ML/AI Resource Extension for OJS.
  *
- * Provides types and helpers for declaring GPU, CPU, memory, and storage
+ * Provides types and helpers for declaring GPU, TPU, CPU, memory, and storage
  * requirements on jobs, following the OJS ML Resource Extension Specification.
  *
  * Resource requirements are stored in the job's `meta` field and require
@@ -10,13 +10,14 @@
  * @example
  * ```ts
  * import { OJSClient } from '@openjobspec/sdk';
- * import { withGPU, withModel, GPUType } from '@openjobspec/sdk/ml';
+ * import { withGPU, withModel, GPUType, mergeMLOptions } from '@openjobspec/sdk/ml';
  *
- * const opts = {
- *   ...withGPU(GPUType.NvidiaA100, 2, 80),
- *   ...withModel({ name: 'resnet50', version: '1.0.0' }),
- * };
- * await client.enqueue('ml.train', { model: 'resnet50' }, opts);
+ * const opts = mergeMLOptions(
+ *   withGPU(GPUType.NvidiaA100, 2, 80),
+ *   withModel({ name: 'resnet50', version: '1.0.0', format: 'safetensors' }),
+ *   withCompute({ runtime: 'pytorch', precision: 'bf16', distributedStrategy: 'fsdp' }),
+ * );
+ * await client.enqueue('ml.train', { model: 'resnet50' }, { queue: 'ml', ...opts });
  * ```
  *
  * @packageDocumentation
@@ -30,15 +31,88 @@ import type { EnqueueOptions, JsonValue } from './job.js';
 export const GPUType = {
   NvidiaA100: 'nvidia-a100',
   NvidiaH100: 'nvidia-h100',
+  NvidiaH200: 'nvidia-h200',
   NvidiaT4: 'nvidia-t4',
   NvidiaL4: 'nvidia-l4',
+  NvidiaL40S: 'nvidia-l40s',
   NvidiaV100: 'nvidia-v100',
+  NvidiaA10G: 'nvidia-a10g',
+  NvidiaB200: 'nvidia-b200',
   AmdMI250: 'amd-mi250',
   AmdMI300X: 'amd-mi300x',
   GoogleTPUv5: 'google-tpu-v5',
 } as const;
 
 export type GPUTypeValue = (typeof GPUType)[keyof typeof GPUType];
+
+/** Well-known TPU type identifiers. */
+export const TPUType = {
+  V4: 'v4',
+  V5e: 'v5e',
+  V5p: 'v5p',
+  V6e: 'v6e',
+} as const;
+
+export type TPUTypeValue = (typeof TPUType)[keyof typeof TPUType];
+
+/** Compute precision values. */
+export const Precision = {
+  FP32: 'fp32',
+  FP16: 'fp16',
+  BF16: 'bf16',
+  FP8: 'fp8',
+  INT8: 'int8',
+  INT4: 'int4',
+} as const;
+
+export type PrecisionValue = (typeof Precision)[keyof typeof Precision];
+
+/** ML runtime identifiers. */
+export const MLRuntime = {
+  PyTorch: 'pytorch',
+  TensorFlow: 'tensorflow',
+  ONNX: 'onnx',
+  Triton: 'triton',
+  VLLM: 'vllm',
+  TGI: 'tgi',
+  Custom: 'custom',
+} as const;
+
+export type MLRuntimeValue = (typeof MLRuntime)[keyof typeof MLRuntime];
+
+/** Distributed strategy identifiers. */
+export const DistributedStrategy = {
+  None: 'none',
+  DataParallel: 'data_parallel',
+  TensorParallel: 'tensor_parallel',
+  PipelineParallel: 'pipeline_parallel',
+  FSDP: 'fsdp',
+  DeepSpeed: 'deepspeed',
+} as const;
+
+export type DistributedStrategyValue =
+  (typeof DistributedStrategy)[keyof typeof DistributedStrategy];
+
+/** GPU interconnect types. */
+export const Interconnect = {
+  NVLink: 'nvlink',
+  PCIe: 'pcie',
+  Any: 'any',
+} as const;
+
+export type InterconnectValue = (typeof Interconnect)[keyof typeof Interconnect];
+
+/** Model format identifiers. */
+export const ModelFormat = {
+  Safetensors: 'safetensors',
+  GGUF: 'gguf',
+  ONNX: 'onnx',
+  TorchScript: 'torchscript',
+  SavedModel: 'savedmodel',
+  Custom: 'custom',
+} as const;
+
+export type ModelFormatValue = (typeof ModelFormat)[keyof typeof ModelFormat];
 
 // ---- Type Definitions ----
 
@@ -48,8 +122,22 @@ export interface GPURequirements {
   count: number;
   /** GPU model identifier (e.g., 'nvidia-a100'). */
   type?: string;
-  /** Minimum GPU memory per device in GB. */
+  /** Minimum GPU VRAM per device in GB. */
   memoryGB?: number;
+  /** Minimum NVIDIA compute capability (e.g., '8.0'). */
+  computeCapability?: string;
+  /** Required GPU interconnect: 'nvlink', 'pcie', 'any'. */
+  interconnect?: string;
+}
+
+/** TPU resource requirements. */
+export interface TPURequirements {
+  /** TPU version: 'v4', 'v5e', 'v5p', 'v6e'. */
+  type?: string;
+  /** TPU pod slice topology (e.g., '2x4', '4x4'). */
+  topology?: string;
+  /** Number of TPU chips required. */
+  chipCount?: number;
 }
 
 /** CPU resource requirements. */
@@ -62,12 +150,16 @@ export interface CPURequirements {
 export interface ResourceRequirements {
   /** GPU resource needs. */
   gpu?: GPURequirements;
+  /** TPU resource needs. */
+  tpu?: TPURequirements;
   /** CPU resource needs. */
   cpu?: CPURequirements;
   /** Minimum system memory in GB. */
   memoryGB?: number;
   /** Minimum scratch storage in GB. */
   storageGB?: number;
+  /** Minimum shared memory (/dev/shm) size in GB. */
+  shmSizeGB?: number;
 }
 
 /** Reference to an ML model artifact. */
@@ -80,6 +172,8 @@ export interface ModelReference {
   registry?: string;
   /** Integrity checksum (e.g., 'sha256:abc123'). */
   checksum?: string;
+  /** Model format (e.g., 'safetensors', 'gguf', 'onnx'). */
+  format?: string;
 }
 
 /** Checkpoint configuration for long-running jobs. */
@@ -104,6 +198,55 @@ export interface PreemptionConfig {
   checkpointOnPreempt?: boolean;
 }
 
+/** Compute constraints for ML jobs. */
+export interface ComputeConfig {
+  /** ML runtime (e.g., 'pytorch', 'vllm', 'onnx'). */
+  runtime?: string;
+  /** Compute precision (e.g., 'fp32', 'fp16', 'bf16', 'fp8'). */
+  precision?: string;
+  /** Distribution strategy (e.g., 'data_parallel', 'tensor_parallel', 'fsdp'). */
+  distributedStrategy?: string;
+  /** Maximum tokens for generation tasks. */
+  maxTokens?: number;
+  /** Maximum batch size for inference. */
+  maxBatchSize?: number;
+}
+
+/** Affinity operator for scheduling rules. */
+export type AffinityOperator =
+  | 'In'
+  | 'NotIn'
+  | 'Exists'
+  | 'DoesNotExist'
+  | 'Gt'
+  | 'Gte'
+  | 'Lt'
+  | 'Lte';
+
+/** An affinity rule for scheduling constraints. */
+export interface AffinityRule {
+  /** Worker label key. */
+  key: string;
+  /** Comparison operator. */
+  operator: AffinityOperator;
+  /** Values to match. */
+  values?: string[];
+}
+
+/** A weighted affinity rule for preferred scheduling. */
+export interface WeightedAffinityRule extends AffinityRule {
+  /** Preference weight (0-100). */
+  weight?: number;
+}
+
+/** Scheduling affinity configuration. */
+export interface AffinityConfig {
+  /** Hard constraints (required). */
+  required?: AffinityRule[];
+  /** Soft constraints (preferred). */
+  preferred?: WeightedAffinityRule[];
+}
+
 /** Enqueue options extended with ML resource metadata. */
 export interface MLEnqueueOptions extends EnqueueOptions {
   meta?: Record<string, JsonValue> & {
@@ -111,6 +254,9 @@ export interface MLEnqueueOptions extends EnqueueOptions {
     model?: Record<string, JsonValue>;
     checkpoint?: Record<string, JsonValue>;
     preemption?: Record<string, JsonValue>;
+    compute?: Record<string, JsonValue>;
+    node_selector?: Record<string, JsonValue>;
+    affinity?: Record<string, JsonValue>;
   };
 }
 
@@ -131,6 +277,37 @@ export function withGPU(
 }
 
 /**
+ * Build EnqueueOptions with detailed GPU resource requirements
+ * including compute capability and interconnect.
+ */
+export function withGPUFull(
+  gpuType: string,
+  count: number,
+  memoryGB: number,
+  computeCapability?: string,
+  interconnect?: string,
+): Partial<EnqueueOptions> {
+  const gpu: GPURequirements = { type: gpuType, count, memoryGB };
+  if (computeCapability !== undefined)
+    gpu.computeCapability = computeCapability;
+  if (interconnect !== undefined) gpu.interconnect = interconnect;
+  return withResources({ gpu });
+}
+
+/**
+ * Build EnqueueOptions with TPU resource requirements.
+ */
+export function withTPU(
+  tpuType: string,
+  topology: string,
+  chipCount: number,
+): Partial<EnqueueOptions> {
+  return withResources({
+    tpu: { type: tpuType, topology, chipCount },
+  });
+}
+
+/**
  * Build EnqueueOptions with full resource requirements in meta.resources.
  */
 export function withResources(
@@ -142,7 +319,17 @@ export function withResources(
     const gpu: Record<string, JsonValue> = { count: req.gpu.count };
     if (req.gpu.type) gpu.type = req.gpu.type;
     if (req.gpu.memoryGB !== undefined) gpu.memory_gb = req.gpu.memoryGB;
+    if (req.gpu.computeCapability)
+      gpu.compute_capability = req.gpu.computeCapability;
+    if (req.gpu.interconnect) gpu.interconnect = req.gpu.interconnect;
     resources.gpu = gpu as JsonValue;
+  }
+  if (req.tpu) {
+    const tpu: Record<string, JsonValue> = {};
+    if (req.tpu.type) tpu.type = req.tpu.type;
+    if (req.tpu.topology) tpu.topology = req.tpu.topology;
+    if (req.tpu.chipCount !== undefined) tpu.chip_count = req.tpu.chipCount;
+    resources.tpu = tpu as JsonValue;
   }
   if (req.cpu) {
     resources.cpu = { cores: req.cpu.cores } as JsonValue;
@@ -152,6 +339,9 @@ export function withResources(
   }
   if (req.storageGB !== undefined) {
     resources.storage_gb = req.storageGB;
+  }
+  if (req.shmSizeGB !== undefined) {
+    resources.shm_size_gb = req.shmSizeGB;
   }
 
   return { meta: { resources: resources as JsonValue } };
@@ -165,6 +355,7 @@ export function withModel(ref: ModelReference): Partial<EnqueueOptions> {
   if (ref.version) model.version = ref.version;
   if (ref.registry) model.registry = ref.registry;
   if (ref.checksum) model.checksum = ref.checksum;
+  if (ref.format) model.format = ref.format;
 
   return { meta: { model: model as JsonValue } };
 }
@@ -202,6 +393,39 @@ export function withPreemption(
 }
 
 /**
+ * Build EnqueueOptions with compute constraints in meta.compute.
+ */
+export function withCompute(cfg: ComputeConfig): Partial<EnqueueOptions> {
+  const compute: Record<string, JsonValue> = {};
+  if (cfg.runtime) compute.runtime = cfg.runtime;
+  if (cfg.precision) compute.precision = cfg.precision;
+  if (cfg.distributedStrategy)
+    compute.distributed_strategy = cfg.distributedStrategy;
+  if (cfg.maxTokens !== undefined) compute.max_tokens = cfg.maxTokens;
+  if (cfg.maxBatchSize !== undefined)
+    compute.max_batch_size = cfg.maxBatchSize;
+
+  return { meta: { compute: compute as JsonValue } };
+}
+
+/**
+ * Build EnqueueOptions with node selector labels in meta.node_selector.
+ * All labels must match for a worker to be eligible (AND semantics).
+ */
+export function withNodeSelector(
+  labels: Record<string, string>,
+): Partial<EnqueueOptions> {
+  return { meta: { node_selector: labels as unknown as JsonValue } };
+}
+
+/**
+ * Build EnqueueOptions with scheduling affinity rules in meta.affinity.
+ */
+export function withAffinity(aff: AffinityConfig): Partial<EnqueueOptions> {
+  return { meta: { affinity: aff as unknown as JsonValue } };
+}
+
+/**
  * Merge multiple ML option partials into a single EnqueueOptions object.
  * Use this to combine withGPU, withModel, withCheckpoint, etc.
  *
@@ -209,8 +433,10 @@ export function withPreemption(
  * ```ts
  * const opts = mergeMLOptions(
  *   withGPU(GPUType.NvidiaA100, 2, 80),
- *   withModel({ name: 'resnet50', version: '1.0.0' }),
+ *   withModel({ name: 'resnet50', version: '1.0.0', format: 'safetensors' }),
  *   withCheckpoint({ enabled: true, intervalSec: 300 }),
+ *   withCompute({ runtime: 'pytorch', precision: 'bf16', distributedStrategy: 'fsdp' }),
+ *   withNodeSelector({ region: 'us-east-1', gpu_type: 'nvidia-a100' }),
  * );
  * await client.enqueue('ml.train', args, { queue: 'ml', ...opts });
  * ```
