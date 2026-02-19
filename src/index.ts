@@ -138,6 +138,27 @@ export {
 export { openTelemetryMiddleware } from './otel.js';
 export type { OpenTelemetryConfig } from './otel.js';
 
+// ---- ML/AI Resource Extension ----
+export {
+  GPUType,
+  withGPU,
+  withModel,
+  withResources,
+  withCheckpoint,
+  withPreemption,
+  mergeMLOptions,
+} from './ml.js';
+export type {
+  GPUTypeValue,
+  GPURequirements,
+  CPURequirements,
+  ResourceRequirements,
+  ModelReference,
+  CheckpointConfig,
+  PreemptionConfig,
+  MLEnqueueOptions,
+} from './ml.js';
+
 // ---- Testing Utilities ----
 import * as testing from './testing.js';
 export { testing };
