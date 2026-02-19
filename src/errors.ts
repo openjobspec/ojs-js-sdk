@@ -6,17 +6,17 @@
 export class OJSError extends Error {
   readonly code: string;
   readonly retryable: boolean;
-  readonly details?: Record<string, unknown>;
-  readonly requestId?: string;
+  readonly details: Record<string, unknown> | undefined;
+  readonly requestId: string | undefined;
 
   constructor(
     message: string,
     code: string,
     options?: {
-      retryable?: boolean;
-      details?: Record<string, unknown>;
-      requestId?: string;
-      cause?: Error;
+      retryable?: boolean | undefined;
+      details?: Record<string, unknown> | undefined;
+      requestId?: string | undefined;
+      cause?: Error | undefined;
     },
   ) {
     super(message, { cause: options?.cause });
@@ -77,7 +77,7 @@ export class OJSNotFoundError extends OJSError {
 
 /** A duplicate job conflict occurred (409). */
 export class OJSDuplicateError extends OJSError {
-  readonly existingJobId?: string;
+  readonly existingJobId: string | undefined;
 
   constructor(
     message: string,
@@ -136,29 +136,29 @@ export class OJSTimeoutError extends OJSError {
 /** Rate limit metadata extracted from response headers. */
 export interface RateLimitInfo {
   /** Maximum requests allowed per window (X-RateLimit-Limit). */
-  limit?: number;
+  limit?: number | undefined;
   /** Remaining requests in current window (X-RateLimit-Remaining). */
-  remaining?: number;
+  remaining?: number | undefined;
   /** Unix timestamp when window resets (X-RateLimit-Reset). */
-  reset?: number;
+  reset?: number | undefined;
   /** Seconds to wait before retrying (Retry-After). */
-  retryAfter?: number;
+  retryAfter?: number | undefined;
 }
 
 /** The server rate-limited the request (429). */
 export class OJSRateLimitError extends OJSError {
   /** Seconds to wait before retrying, if provided by the server. */
-  readonly retryAfter?: number;
+  readonly retryAfter: number | undefined;
   /** Rate limit metadata from response headers. */
-  readonly rateLimit?: RateLimitInfo;
+  readonly rateLimit: RateLimitInfo | undefined;
 
   constructor(
     message: string,
     options?: {
-      retryAfter?: number;
-      rateLimit?: RateLimitInfo;
-      details?: Record<string, unknown>;
-      requestId?: string;
+      retryAfter?: number | undefined;
+      rateLimit?: RateLimitInfo | undefined;
+      details?: Record<string, unknown> | undefined;
+      requestId?: string | undefined;
     },
   ) {
     super(message, 'rate_limited', {
@@ -224,10 +224,21 @@ export function parseErrorResponse(
       const remainingRaw = headers.get('X-RateLimit-Remaining');
       const resetRaw = headers.get('X-RateLimit-Reset');
       if (limitRaw !== null || remainingRaw !== null || resetRaw !== null || retryAfter !== undefined) {
-        rateLimit = { retryAfter };
-        if (limitRaw !== null) { const v = parseInt(limitRaw, 10); if (!isNaN(v)) rateLimit.limit = v; }
-        if (remainingRaw !== null) { const v = parseInt(remainingRaw, 10); if (!isNaN(v)) rateLimit.remaining = v; }
-        if (resetRaw !== null) { const v = parseInt(resetRaw, 10); if (!isNaN(v)) rateLimit.reset = v; }
+        const parsedRateLimit: RateLimitInfo = {};
+        if (retryAfter !== undefined) parsedRateLimit.retryAfter = retryAfter;
+        if (limitRaw !== null) {
+          const v = parseInt(limitRaw, 10);
+          if (!isNaN(v)) parsedRateLimit.limit = v;
+        }
+        if (remainingRaw !== null) {
+          const v = parseInt(remainingRaw, 10);
+          if (!isNaN(v)) parsedRateLimit.remaining = v;
+        }
+        if (resetRaw !== null) {
+          const v = parseInt(resetRaw, 10);
+          if (!isNaN(v)) parsedRateLimit.reset = v;
+        }
+        rateLimit = parsedRateLimit;
       }
     }
     return new OJSRateLimitError(message, { retryAfter, rateLimit, details, requestId });
