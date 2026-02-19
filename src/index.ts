@@ -110,6 +110,10 @@ export type {
   SchemaListOptions,
 } from './schema.js';
 
+// ---- Progress Reporting ----
+export { reportProgress } from './progress.js';
+export type { ProgressReport } from './progress.js';
+
 // ---- Transport ----
 export { HttpTransport } from './transport/http.js';
 export type {
