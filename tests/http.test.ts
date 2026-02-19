@@ -162,7 +162,7 @@ describe('HttpTransport', () => {
         new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: {
-            'OJS-Version': '1.0.0-rc.1',
+            'OJS-Version': '1.0',
             'Content-Type': 'application/openjobspec+json',
             'X-Request-Id': 'req_abc123',
             'Location': '/ojs/v1/jobs/456',
@@ -173,7 +173,7 @@ describe('HttpTransport', () => {
       const transport = new HttpTransport({ url: 'http://localhost:8080' });
       const response = await transport.request({ method: 'GET', path: '/health' });
 
-      expect(response.headers.ojsVersion).toBe('1.0.0-rc.1');
+      expect(response.headers.ojsVersion).toBe('1.0');
       expect(response.headers.requestId).toBe('req_abc123');
       expect(response.headers.location).toBe('/ojs/v1/jobs/456');
     });
@@ -222,7 +222,10 @@ describe('HttpTransport', () => {
         ),
       );
 
-      const transport = new HttpTransport({ url: 'http://localhost:8080' });
+      const transport = new HttpTransport({
+        url: 'http://localhost:8080',
+        retryConfig: { enabled: false },
+      });
 
       await expect(
         transport.request({ method: 'POST', path: '/jobs', body: {} }),
@@ -336,7 +339,7 @@ describe('fetchManifest', () => {
   });
 
   it('should fetch manifest from /ojs/manifest', async () => {
-    const manifestData = { specversion: '1.0.0-rc.1', layers: [1, 2, 3] };
+    const manifestData = { specversion: '1.0', layers: [1, 2, 3] };
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(manifestData), {
         status: 200,

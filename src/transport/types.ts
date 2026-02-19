@@ -3,12 +3,14 @@
  * Defines the contract that transport implementations must satisfy.
  */
 
+import type { RetryConfig } from '../rate-limiter.js';
+
 /** Standard OJS response headers. */
 export interface OJSResponseHeaders {
-  ojsVersion?: string;
-  contentType?: string;
-  requestId?: string;
-  location?: string;
+  ojsVersion?: string | undefined;
+  contentType?: string | undefined;
+  requestId?: string | undefined;
+  location?: string | undefined;
 }
 
 /** A transport response wrapping the parsed body and headers. */
@@ -22,12 +24,12 @@ export interface TransportResponse<T = unknown> {
 export interface TransportRequestOptions {
   method: 'GET' | 'POST' | 'DELETE';
   path: string;
-  body?: unknown;
-  headers?: Record<string, string>;
-  signal?: AbortSignal;
-  timeout?: number;
+  body?: unknown | undefined;
+  headers?: Record<string, string> | undefined;
+  signal?: AbortSignal | undefined;
+  timeout?: number | undefined;
   /** If true, the path is used as-is (no /ojs/v1 prefix). */
-  rawPath?: boolean;
+  rawPath?: boolean | undefined;
 }
 
 /**
@@ -48,14 +50,17 @@ export interface TransportConfig {
   url: string;
 
   /** Optional authorization header value (e.g., 'Bearer <token>'). */
-  auth?: string;
+  auth?: string | undefined;
 
   /** Custom headers to include in every request. */
-  headers?: Record<string, string>;
+  headers?: Record<string, string> | undefined;
 
   /** Default request timeout in milliseconds. */
-  timeout?: number;
+  timeout?: number | undefined;
 
   /** OJS spec version to send in the OJS-Version header. */
-  specVersion?: string;
+  specVersion?: string | undefined;
+
+  /** Configuration for automatic retry on 429 responses. */
+  retryConfig?: Partial<RetryConfig> | undefined;
 }
