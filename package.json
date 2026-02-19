@@ -17,6 +17,36 @@
         "types": "./dist/esm/index.d.ts",
         "default": "./dist/cjs/index.js"
       }
+    },
+    "./serverless": {
+      "import": {
+        "types": "./dist/esm/serverless/index.d.ts",
+        "default": "./dist/esm/serverless/index.js"
+      },
+      "require": {
+        "types": "./dist/esm/serverless/index.d.ts",
+        "default": "./dist/cjs/serverless/index.js"
+      }
+    },
+    "./serverless/cloudflare": {
+      "import": {
+        "types": "./dist/esm/serverless/cloudflare.d.ts",
+        "default": "./dist/esm/serverless/cloudflare.js"
+      },
+      "require": {
+        "types": "./dist/esm/serverless/cloudflare.d.ts",
+        "default": "./dist/cjs/serverless/cloudflare.js"
+      }
+    },
+    "./serverless/vercel": {
+      "import": {
+        "types": "./dist/esm/serverless/vercel.d.ts",
+        "default": "./dist/esm/serverless/vercel.js"
+      },
+      "require": {
+        "types": "./dist/esm/serverless/vercel.d.ts",
+        "default": "./dist/cjs/serverless/vercel.js"
+      }
     }
   },
   "files": [
@@ -36,6 +66,8 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.13",
     "@opentelemetry/api": "^1.9.0",
     "@size-limit/file": "^12.0.0",
     "@vitest/coverage-v8": "^2.1.9",
@@ -46,10 +78,18 @@
     "vitest": "^2.0.0"
   },
   "peerDependencies": {
-    "@opentelemetry/api": "^1.0.0"
+    "@opentelemetry/api": "^1.0.0",
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
+      "optional": true
+    },
+    "@grpc/grpc-js": {
+      "optional": true
+    },
+    "@grpc/proto-loader": {
       "optional": true
     }
   },
