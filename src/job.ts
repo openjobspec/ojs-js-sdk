@@ -227,8 +227,12 @@ function parseDuration(delay: string): string {
     return delay;
   }
 
-  const value = parseInt(match[1], 10);
+  const valuePart = match[1];
   const unit = match[2];
+  if (!valuePart || !unit) {
+    return delay;
+  }
+  const value = parseInt(valuePart, 10);
 
   let ms: number;
   switch (unit) {

@@ -66,6 +66,10 @@ export {
 } from './retry.js';
 export type { BackoffStrategy } from './retry.js';
 
+// ---- Rate Limit Retry ----
+export { DEFAULT_RETRY_CONFIG } from './rate-limiter.js';
+export type { RetryConfig } from './rate-limiter.js';
+
 // ---- Events ----
 export { OJSEventEmitter } from './events.js';
 export type {
@@ -88,6 +92,12 @@ export {
   OJSRateLimitError,
 } from './errors.js';
 export type { RateLimitInfo } from './errors.js';
+export type { ErrorCodeEntry } from './error-codes.js';
+export {
+  ALL_ERROR_CODES,
+  lookupByCanonicalCode,
+  lookupByCode,
+} from './error-codes.js';
 
 // ---- Queue Operations ----
 export { QueueOperations } from './queue.js';
@@ -116,6 +126,8 @@ export type { ProgressReport } from './progress.js';
 
 // ---- Transport ----
 export { HttpTransport } from './transport/http.js';
+export { GrpcTransport } from './transport/grpc.js';
+export type { GrpcTransportConfig } from './transport/grpc.js';
 export type {
   Transport,
   TransportConfig,
@@ -137,6 +149,31 @@ export {
 // OpenTelemetry
 export { openTelemetryMiddleware } from './otel.js';
 export type { OpenTelemetryConfig } from './otel.js';
+
+// ---- Serverless Adapters ----
+export {
+  createWorkerHandler,
+  createEdgeHandler,
+  createLambdaHandler,
+} from './serverless/index.js';
+export type {
+  CloudflareWorkerOptions,
+  CloudflareJobContext,
+  CloudflareJobHandler,
+  CloudflareWorkerHandler,
+  VercelEdgeOptions,
+  VercelJobContext,
+  VercelJobHandler,
+  VercelEdgeHandler,
+  LambdaOptions,
+  LambdaJobContext,
+  LambdaJobHandler,
+  LambdaHandler,
+  SQSEvent,
+  SQSRecord,
+  SQSBatchResponse,
+  DirectResponse,
+} from './serverless/index.js';
 
 // ---- ML/AI Resource Extension ----
 export {

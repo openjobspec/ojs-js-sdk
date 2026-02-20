@@ -6,6 +6,7 @@
 
 import { HttpTransport } from './transport/http.js';
 import type { Transport } from './transport/types.js';
+import type { RetryConfig } from './rate-limiter.js';
 import type {
   Job,
   JobSpec,
@@ -43,6 +44,8 @@ export interface OJSClientConfig {
   timeout?: number;
   /** Custom transport implementation (for testing or custom protocols). */
   transport?: Transport;
+  /** Configuration for automatic retry on 429 rate-limit responses. */
+  retryConfig?: Partial<RetryConfig>;
 }
 
 export class OJSClient {
@@ -62,14 +65,17 @@ export class OJSClient {
   readonly schemas: SchemaOperations;
 
   constructor(config: OJSClientConfig) {
+    const transportConfig = {
+      url: config.url,
+      ...(config.auth !== undefined ? { auth: config.auth } : {}),
+      ...(config.headers !== undefined ? { headers: config.headers } : {}),
+      ...(config.timeout !== undefined ? { timeout: config.timeout } : {}),
+      ...(config.retryConfig !== undefined ? { retryConfig: config.retryConfig } : {}),
+    };
+
     this.transport =
       config.transport ??
-      new HttpTransport({
-        url: config.url,
-        auth: config.auth,
-        headers: config.headers,
-        timeout: config.timeout,
-      });
+      new HttpTransport(transportConfig);
 
     this.queues = new QueueOperations(this.transport);
     this.cron = new CronOperations(this.transport);
@@ -119,7 +125,7 @@ export class OJSClient {
       type,
       queue: options?.queue ?? 'default',
       args: wireArgs,
-      meta: options?.meta,
+      ...(options?.meta !== undefined ? { meta: options.meta } : {}),
     };
 
     // Run through enqueue middleware chain
@@ -127,11 +133,18 @@ export class OJSClient {
       this.enqueueMiddleware.entries(),
       async (job) => {
         // Client-side validation
-        const errors = validateEnqueueRequest({
+        const validationPayload: {
+          type: string;
+          args: JsonValue[];
+          options?: { queue?: string };
+        } = {
           type: job.type,
           args: job.args,
-          options: wireOptions as { queue?: string } | undefined,
-        });
+        };
+        if (wireOptions !== undefined) {
+          validationPayload.options = wireOptions as { queue?: string };
+        }
+        const errors = validateEnqueueRequest(validationPayload);
         if (errors.length > 0) {
           throw new OJSValidationError(
             errors.map((e) => e.message).join('; '),

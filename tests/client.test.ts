@@ -293,7 +293,7 @@ describe('OJSClient', () => {
         async request<T>(options: import('../src/transport/types.js').TransportRequestOptions): Promise<import('../src/transport/types.js').TransportResponse<T>> {
           mock.requests.push(options);
           if (options.path === '/ojs/manifest') {
-            return { status: 200, headers: {}, body: { specversion: '1.0.0-rc.1', layers: [1, 2, 3] } as T };
+            return { status: 200, headers: {}, body: { specversion: '1.0', layers: [1, 2, 3] } as T };
           }
           return { status: 200, headers: {}, body: {} as T };
         },
@@ -301,7 +301,7 @@ describe('OJSClient', () => {
 
       const manifestClient = new OJSClient({ url: 'http://localhost:8080', transport: mockTransport });
       const manifest = await manifestClient.manifest();
-      expect(manifest.specversion).toBe('1.0.0-rc.1');
+      expect(manifest.specversion).toBe('1.0');
     });
   });
 

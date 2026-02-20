@@ -43,8 +43,8 @@ export interface OJSEvent<T = Record<string, unknown>> {
   type: OJSEventType;
   source: string;
   time: string;
-  subject?: string;
-  datacontenttype?: string;
+  subject?: string | undefined;
+  datacontenttype?: string | undefined;
   data: T;
 }
 
