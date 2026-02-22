@@ -200,3 +200,7 @@ export type {
 import * as testing from './testing.js';
 export { testing };
 export type { FakeJob, MatchOptions } from './testing.js';
+
+// ---- Real-time Subscriptions (SSE) ----
+export { subscribe, subscribeJob, subscribeQueue } from './subscribe.js';
+export type { SSEEvent, SSEEventHandler, SSESubscription, SubscribeOptions } from './subscribe.js';
