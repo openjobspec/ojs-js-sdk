@@ -357,3 +357,4 @@ export class OJSClient {
     return this.enqueueMiddleware;
   }
 }
+
