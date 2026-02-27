@@ -196,6 +196,10 @@ export type {
   MLEnqueueOptions,
 } from './ml.js';
 
+// ---- Durable Execution ----
+export { DurableContext } from './durable.js';
+export type { DurableJobHandler } from './durable.js';
+
 // ---- Testing Utilities ----
 import * as testing from './testing.js';
 export { testing };
