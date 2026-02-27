@@ -17,6 +17,7 @@ import {
 } from './middleware.js';
 import { OJSEventEmitter } from './events.js';
 import { OJSTimeoutError } from './errors.js';
+import { DurableContext, type DurableJobHandler } from './durable.js';
 
 /** Worker lifecycle state per the OJS Worker Protocol. */
 export type WorkerState = 'running' | 'quiet' | 'terminate' | 'terminated';
@@ -134,6 +135,29 @@ export class OJSWorker {
    */
   register(type: string, handler: JobHandler): this {
     this.handlers.set(type, handler);
+    return this;
+  }
+
+  /**
+   * Register a durable job handler with checkpoint support.
+   *
+   * The handler receives a {@link DurableContext} that provides deterministic
+   * wrappers for non-deterministic operations (time, random, external calls).
+   *
+   * @example
+   * ```ts
+   * worker.registerDurable('etl.process', async (ctx, dc) => {
+   *   const data = await dc.sideEffect('fetch', () => fetchFromAPI());
+   *   await dc.checkpoint(1, { fetched: true });
+   *   await dc.complete();
+   * });
+   * ```
+   */
+  registerDurable(type: string, handler: DurableJobHandler): this {
+    this.handlers.set(type, async (ctx: JobContext) => {
+      const dc = await DurableContext.create(this.transport, ctx.job.id, ctx.attempt);
+      return handler(ctx, dc);
+    });
     return this;
   }
 
