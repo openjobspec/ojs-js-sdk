@@ -1,6 +1,6 @@
 {
   "name": "@openjobspec/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Official Open Job Spec SDK for JavaScript and TypeScript",
   "license": "Apache-2.0",
   "type": "module",
