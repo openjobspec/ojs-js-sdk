@@ -60,27 +60,31 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "bench": "vitest bench",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && eslint src/",
+    "lint:fix": "eslint src/ --fix",
     "size": "size-limit",
     "docs": "typedoc --out docs src/index.ts",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@grpc/grpc-js": "^1.12.0",
     "@grpc/proto-loader": "^0.7.13",
     "@opentelemetry/api": "^1.9.0",
     "@size-limit/file": "^12.0.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "eslint": "^10.0.2",
     "fast-check": "^4.5.3",
     "size-limit": "^12.0.0",
     "typedoc": "^0.27.0",
     "typescript": "^5.4.0",
+    "typescript-eslint": "^8.56.1",
     "vitest": "^2.0.0"
   },
   "peerDependencies": {
-    "@opentelemetry/api": "^1.0.0",
     "@grpc/grpc-js": "^1.9.0",
-    "@grpc/proto-loader": "^0.7.0"
+    "@grpc/proto-loader": "^0.7.0",
+    "@opentelemetry/api": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
