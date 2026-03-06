@@ -137,7 +137,11 @@ export class HttpTransport implements Transport {
       }
 
       // Wrap fetch/network errors
-      if (error instanceof TypeError || error instanceof DOMException) {
+      if (
+        error instanceof TypeError ||
+        error instanceof DOMException ||
+        error instanceof SyntaxError
+      ) {
         throw new OJSConnectionError(
           `Connection failed: ${(error as Error).message}`,
           error as Error,
