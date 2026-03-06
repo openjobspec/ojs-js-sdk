@@ -64,3 +64,4 @@ export interface TransportConfig {
   /** Configuration for automatic retry on 429 responses. */
   retryConfig?: Partial<RetryConfig> | undefined;
 }
+
