@@ -20,3 +20,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy with 7 error classes
 - Full TypeScript type definitions with strict mode
 - 5 example files covering all major features
+
