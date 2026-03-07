@@ -146,6 +146,19 @@ export {
   validateEnqueueRequest,
 } from './validation/schemas.js';
 
+// ---- Encryption Middleware ----
+export {
+  EncryptionCodec,
+  StaticKeyProvider,
+  encryptionMiddleware,
+  decryptionMiddleware,
+  META_ENCODINGS,
+  META_KEY_ID,
+  META_NONCE,
+  ENCODING_ENCRYPTED,
+} from './encryption.js';
+export type { KeyProvider, EncryptResult } from './encryption.js';
+
 // OpenTelemetry
 export { openTelemetryMiddleware } from './otel.js';
 export type { OpenTelemetryConfig } from './otel.js';
