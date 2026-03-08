@@ -98,6 +98,7 @@ export class HttpTransport implements Transport {
         method: options.method,
         headers: {
           ...this.defaultHeaders,
+          'X-Request-ID': crypto.randomUUID(),
           ...options.headers,
         },
         signal: controller.signal,
@@ -107,7 +108,13 @@ export class HttpTransport implements Transport {
       };
       const response = await fetch(url, requestInit);
 
+      // Clear timeout immediately to prevent late abort race condition
       clearTimeout(timeoutId);
+
+      // Detach external signal to prevent late cancellation
+      if (options.signal) {
+        options.signal.removeEventListener('abort', controller.abort);
+      }
 
       const headers = parseResponseHeaders(response.headers);
 
