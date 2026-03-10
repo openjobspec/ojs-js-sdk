@@ -108,10 +108,8 @@ export class HttpTransport implements Transport {
       };
       const response = await fetch(url, requestInit);
 
-      // Clear timeout immediately to prevent late abort race condition
-      clearTimeout(timeoutId);
-
-      // Detach external signal to prevent late cancellation
+      // Detach external signal to prevent late cancellation (but keep timeout
+      // active through body parsing — a slow body could still hang)
       if (options.signal) {
         options.signal.removeEventListener('abort', controller.abort);
       }
@@ -120,10 +118,23 @@ export class HttpTransport implements Transport {
 
       // No content response
       if (response.status === 204) {
+        clearTimeout(timeoutId);
         return { status: response.status, headers, body: {} as T };
       }
 
-      const body = (await response.json()) as T;
+      let body: T;
+      try {
+        body = (await response.json()) as T;
+      } catch (parseError) {
+        clearTimeout(timeoutId);
+        throw new OJSConnectionError(
+          `Invalid JSON response (status ${response.status})`,
+          parseError instanceof Error ? parseError : undefined,
+        );
+      }
+
+      // Body parsed successfully, safe to clear timeout
+      clearTimeout(timeoutId);
 
       // Throw on error status codes
       if (!response.ok) {
