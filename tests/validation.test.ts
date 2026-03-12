@@ -89,6 +89,18 @@ describe('validateQueueName', () => {
     expect(validateQueueName('queue@name')).not.toBeNull();
     expect(validateQueueName('queue name')).not.toBeNull();
   });
+
+  it('rejects names with trailing separators', () => {
+    expect(validateQueueName('queue.')).not.toBeNull();
+    expect(validateQueueName('queue-')).not.toBeNull();
+  });
+
+  it('rejects names with consecutive separators', () => {
+    expect(validateQueueName('queue..name')).not.toBeNull();
+    expect(validateQueueName('queue--name')).not.toBeNull();
+    expect(validateQueueName('queue.-name')).not.toBeNull();
+    expect(validateQueueName('queue-.name')).not.toBeNull();
+  });
 });
 
 describe('validateArgs', () => {

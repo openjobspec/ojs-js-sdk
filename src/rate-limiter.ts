@@ -12,6 +12,8 @@ export interface RetryConfig {
   maxBackoffMs: number;
   /** Whether automatic retry is enabled. Default: true. */
   enabled: boolean;
+  /** Whether to retry on 502, 503, 504 transient server errors. Default: true. */
+  retryServerErrors: boolean;
 }
 
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
@@ -19,7 +21,22 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
   minBackoffMs: 500,
   maxBackoffMs: 30_000,
   enabled: true,
+  retryServerErrors: true,
 };
+
+/**
+ * Returns true if the given HTTP status code is retryable under the config.
+ */
+export function isRetryableStatus(
+  statusCode: number,
+  config: RetryConfig,
+): boolean {
+  if (statusCode === 429) return true;
+  if (config.retryServerErrors && (statusCode === 502 || statusCode === 503 || statusCode === 504)) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Parse a Retry-After header value into milliseconds.

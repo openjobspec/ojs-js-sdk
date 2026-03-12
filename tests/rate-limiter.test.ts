@@ -115,6 +115,7 @@ describe('rate-limiter utilities', () => {
         minBackoffMs: 500,
         maxBackoffMs: 30_000,
         enabled: true,
+        retryServerErrors: true,
       });
     });
   });

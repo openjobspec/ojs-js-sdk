@@ -157,12 +157,13 @@ async function readStream(
           eventType = '';
           eventId = '';
           eventData = '';
-        } else if (line.startsWith('event: ')) {
-          eventType = line.slice(7);
-        } else if (line.startsWith('id: ')) {
-          eventId = line.slice(4);
-        } else if (line.startsWith('data: ')) {
-          eventData = line.slice(6);
+        } else if (line.startsWith('event:')) {
+          eventType = line.slice(6).trimStart();
+        } else if (line.startsWith('id:')) {
+          eventId = line.slice(3).trimStart();
+        } else if (line.startsWith('data:')) {
+          const chunk = line.slice(5).trimStart();
+          eventData = eventData ? eventData + '\n' + chunk : chunk;
         }
       }
     }

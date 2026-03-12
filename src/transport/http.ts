@@ -3,8 +3,8 @@
  * Zero dependencies — works in Node.js 18+, Deno, Bun, and browsers.
  */
 
-import { OJSConnectionError, OJSRateLimitError, parseErrorResponse } from '../errors.js';
-import { DEFAULT_RETRY_CONFIG, computeRetryDelay } from '../rate-limiter.js';
+import { OJSConnectionError, OJSRateLimitError, OJSServerError, parseErrorResponse } from '../errors.js';
+import { DEFAULT_RETRY_CONFIG, computeRetryDelay, isRetryableStatus } from '../rate-limiter.js';
 import type { RetryConfig } from '../rate-limiter.js';
 import type {
   Transport,
@@ -55,16 +55,20 @@ export class HttpTransport implements Transport {
       } catch (error) {
         lastError = error;
 
-        // Only retry on rate limit errors when retries are enabled
+        // Retry on rate limit (429) and optionally on transient server errors (502/503/504)
+        const isRateLimit = error instanceof OJSRateLimitError;
+        const isServerError = error instanceof OJSServerError &&
+          isRetryableStatus(error.statusCode, this.retryConfig);
+
         if (
-          !(error instanceof OJSRateLimitError) ||
+          (!isRateLimit && !isServerError) ||
           !this.retryConfig.enabled ||
           attempt >= this.retryConfig.maxRetries
         ) {
           throw error;
         }
 
-        const retryAfterMs = error.retryAfter !== undefined
+        const retryAfterMs = isRateLimit && error.retryAfter !== undefined
           ? error.retryAfter * 1000
           : undefined;
         const delayMs = computeRetryDelay(attempt, this.retryConfig, retryAfterMs);

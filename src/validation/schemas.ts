@@ -6,7 +6,7 @@
  */
 
 const JOB_TYPE_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$/;
-const QUEUE_PATTERN = /^[a-z0-9][a-z0-9\-.]*$/;
+const QUEUE_PATTERN = /^[a-z0-9]([a-z0-9]*[-.]?[a-z0-9]+)*$/;
 const UUID_V7_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
