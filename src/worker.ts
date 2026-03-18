@@ -49,6 +49,13 @@ export interface OJSWorkerConfig {
   transport?: Transport;
   /** Worker labels for filtering and grouping. */
   labels?: string[];
+  /**
+   * Automatically handle SIGTERM and SIGINT for graceful shutdown.
+   * When enabled, the worker installs process signal handlers on start()
+   * and removes them on stop(). Set to false if you manage signals yourself.
+   * Default: true (Node.js only; no-op in browsers).
+   */
+  handleSignals?: boolean;
 }
 
 export class OJSWorker {
@@ -83,6 +90,8 @@ export class OJSWorker {
   private shutdownPromise: Promise<void> | null = null;
   private shutdownResolve: (() => void) | null = null;
   private graceTimerId: ReturnType<typeof setTimeout> | null = null;
+  private readonly handleSignals: boolean;
+  private signalHandler: (() => void) | null = null;
 
   constructor(workerConfig: OJSWorkerConfig) {
     this.transport =
@@ -104,6 +113,11 @@ export class OJSWorker {
       visibilityTimeout: workerConfig.visibilityTimeout ?? 30000,
       labels: workerConfig.labels ?? [],
     };
+
+    // Default to true in Node.js environments, false in browsers
+    this.handleSignals =
+      workerConfig.handleSignals ??
+      (typeof process !== 'undefined' && typeof process.on === 'function');
   }
 
   /** Current worker lifecycle state. */
@@ -229,10 +243,21 @@ export class OJSWorker {
 
     // Start heartbeat loop
     this.heartbeatTimer = setInterval(() => {
-      this.sendHeartbeat().catch(() => {
-        // Heartbeat failures are non-fatal (per spec)
+      this.sendHeartbeat().catch((err) => {
+        console.warn('[ojs-worker] heartbeat failed:', String(err));
       });
     }, this.config.heartbeatInterval);
+
+    // Install process signal handlers for graceful shutdown in containers/K8s
+    if (this.handleSignals && typeof process !== 'undefined' && typeof process.on === 'function') {
+      this.signalHandler = () => {
+        this.stop().catch((err) => {
+          console.warn('[ojs-worker] shutdown error:', String(err));
+        });
+      };
+      process.on('SIGTERM', this.signalHandler);
+      process.on('SIGINT', this.signalHandler);
+    }
 
     // Start poll loop
     this.poll();
@@ -263,6 +288,13 @@ export class OJSWorker {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+
+    // Remove signal handlers to prevent memory leaks and duplicate triggers
+    if (this.signalHandler && typeof process !== 'undefined' && typeof process.removeListener === 'function') {
+      process.removeListener('SIGTERM', this.signalHandler);
+      process.removeListener('SIGINT', this.signalHandler);
+      this.signalHandler = null;
     }
 
     // Wait for active jobs with a timeout
@@ -461,11 +493,13 @@ export class OJSWorker {
 
   // ---- Internal: ACK / NACK ----
 
+  private static readonly ACK_NACK_MAX_RETRIES = 3;
+
   private async ack(jobId: string, result?: JsonValue): Promise<void> {
     const body: Record<string, unknown> = { job_id: jobId };
     if (result !== undefined) body.result = result;
 
-    await this.transport.request({
+    await this.requestWithRetry('ack', jobId, {
       method: 'POST',
       path: '/workers/ack',
       body,
@@ -473,11 +507,35 @@ export class OJSWorker {
   }
 
   private async nack(jobId: string, error: JobError): Promise<void> {
-    await this.transport.request({
+    await this.requestWithRetry('nack', jobId, {
       method: 'POST',
       path: '/workers/nack',
       body: { job_id: jobId, error },
     });
+  }
+
+  private async requestWithRetry(
+    operation: string,
+    jobId: string,
+    options: { method: string; path: string; body: unknown },
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < OJSWorker.ACK_NACK_MAX_RETRIES; attempt++) {
+      try {
+        await this.transport.request(options);
+        return;
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `[ojs-worker] ${operation} attempt ${attempt + 1} failed for job ${jobId}:`,
+          String(err),
+        );
+        if (attempt < OJSWorker.ACK_NACK_MAX_RETRIES - 1) {
+          await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 500));
+        }
+      }
+    }
+    throw lastError;
   }
 
   // ---- Internal: Heartbeat ----
