@@ -47,6 +47,33 @@
         "types": "./dist/esm/serverless/vercel.d.ts",
         "default": "./dist/cjs/serverless/vercel.js"
       }
+    },
+    "./agent": {
+      "import": {
+        "types": "./dist/esm/agent/index.d.ts",
+        "default": "./dist/esm/agent/index.js"
+      },
+      "require": {
+        "default": "./dist/cjs/agent/index.js"
+      }
+    },
+    "./attest": {
+      "import": {
+        "types": "./dist/esm/attest/index.d.ts",
+        "default": "./dist/esm/attest/index.js"
+      },
+      "require": {
+        "default": "./dist/cjs/attest/index.js"
+      }
+    },
+    "./recorder": {
+      "import": {
+        "types": "./dist/esm/recorder/index.d.ts",
+        "default": "./dist/esm/recorder/index.js"
+      },
+      "require": {
+        "default": "./dist/cjs/recorder/index.js"
+      }
     }
   },
   "files": [
