@@ -127,6 +127,85 @@ describe('OJSEventEmitter', () => {
       // Should not throw
       await emitter.emit(createTestEvent('job.completed'));
     });
+
+    it('does not reject when a listener throws synchronously', async () => {
+      const emitter = new OJSEventEmitter();
+      const goodListener = vi.fn();
+      emitter.on('job.completed', () => {
+        throw new Error('synchronous boom');
+      });
+      emitter.on('job.completed', goodListener);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(emitter.emit(createTestEvent('job.completed'))).resolves.toBeUndefined();
+
+      // The broken listener must not prevent the other listener from running.
+      expect(goodListener).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("listener for 'job.completed' threw"),
+        expect.stringContaining('synchronous boom'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not reject when a listener rejects asynchronously', async () => {
+      const emitter = new OJSEventEmitter();
+      const goodListener = vi.fn();
+      emitter.on('job.completed', async () => {
+        throw new Error('async boom');
+      });
+      emitter.on('job.completed', goodListener);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(emitter.emit(createTestEvent('job.completed'))).resolves.toBeUndefined();
+
+      expect(goodListener).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("listener for 'job.completed' threw"),
+        expect.stringContaining('async boom'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('isolates a throwing wildcard listener from a passing type-specific listener', async () => {
+      const emitter = new OJSEventEmitter();
+      const typeListener = vi.fn();
+      emitter.onAny(() => {
+        throw new Error('wildcard boom');
+      });
+      emitter.on('job.completed', typeListener);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await expect(emitter.emit(createTestEvent('job.completed'))).resolves.toBeUndefined();
+      expect(typeListener).toHaveBeenCalledOnce();
+      warnSpy.mockRestore();
+    });
+
+    it('runs multiple async listeners concurrently, not sequentially', async () => {
+      // Regression guard: emit() must start all listeners immediately and
+      // await them together, not await each one before starting the next —
+      // otherwise N slow listeners take N times as long as they should.
+      const emitter = new OJSEventEmitter();
+      const active = { count: 0, maxConcurrent: 0 };
+
+      // Distinct closures: OJSEventEmitter stores listeners in a Set, which
+      // would dedupe the *same* function reference registered multiple
+      // times, defeating the point of this concurrency check.
+      const makeSlowListener = () => async (): Promise<void> => {
+        active.count++;
+        active.maxConcurrent = Math.max(active.maxConcurrent, active.count);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active.count--;
+      };
+
+      emitter.on('job.completed', makeSlowListener());
+      emitter.on('job.completed', makeSlowListener());
+      emitter.on('job.completed', makeSlowListener());
+
+      await emitter.emit(createTestEvent('job.completed'));
+
+      expect(active.maxConcurrent).toBe(3);
+    });
   });
 
   describe('removeAllListeners()', () => {

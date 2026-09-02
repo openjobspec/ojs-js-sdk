@@ -34,7 +34,7 @@ import type {
 
 // Re-export MeterProvider-related types locally since @opentelemetry/api
 // splits meter types across modules.
-interface MeterProvider {
+export interface MeterProvider {
   getMeter(name: string, version?: string): {
     createCounter(name: string, options?: Record<string, string>): Counter;
     createHistogram(name: string, options?: Record<string, string>): Histogram;
