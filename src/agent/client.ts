@@ -57,7 +57,9 @@ export class AgentClient {
     const response = await fetch(url, {
       method,
       headers: this.headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      // Omit `body` entirely (rather than setting it to `undefined`) so the
+      // object literal satisfies RequestInit under exactOptionalPropertyTypes.
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
 
     if (!response.ok) {

@@ -1,4 +1,4 @@
-export { AgentClient } from './client.js';
+export { AgentClient, AgentError } from './client.js';
 export type { AgentClientConfig } from './client.js';
 export type {
   MergeStrategy,
