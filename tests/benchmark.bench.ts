@@ -213,7 +213,8 @@ describe('Job serialization benchmarks', () => {
       non_retryable_errors: ['auth.*', 'validation.*'],
     },
     unique: {
-      key: ['type', 'args'],
+      keys: ['type', 'args'],
+      argsKeys: ['id'],
       period: 'PT1H',
       on_conflict: 'reject',
       states: ['available', 'active'],
@@ -395,7 +396,8 @@ describe('Client request building benchmarks', () => {
     toWireOptions({
       queue: 'default',
       unique: {
-        key: ['type', 'args'],
+        keys: ['type', 'args'],
+        argsKeys: ['id'],
         period: 'PT1H',
         onConflict: 'reject',
         states: ['available', 'active'],
@@ -421,7 +423,8 @@ describe('Client request building benchmarks', () => {
         onExhaustion: 'dead_letter',
       },
       unique: {
-        key: ['type', 'args'],
+        keys: ['type', 'args'],
+        argsKeys: ['id'],
         period: 'PT1H',
         onConflict: 'reject',
         states: ['available', 'active'],

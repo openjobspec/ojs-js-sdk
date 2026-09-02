@@ -75,6 +75,24 @@ export class OJSNotFoundError extends OJSError {
   }
 }
 
+/** The requested HTTP method is not supported for this resource (405). */
+export class OJSMethodNotAllowedError extends OJSError {
+  readonly statusCode = 405;
+
+  constructor(
+    message = 'Method Not Allowed',
+    details?: Record<string, unknown>,
+    requestId?: string,
+  ) {
+    super(message, 'method_not_allowed', {
+      retryable: false,
+      details,
+      requestId,
+    });
+    this.name = 'OJSMethodNotAllowedError';
+  }
+}
+
 /** A duplicate job conflict occurred (409). */
 export class OJSDuplicateError extends OJSError {
   readonly existingJobId: string | undefined;
@@ -115,9 +133,44 @@ export class OJSServerError extends OJSError {
 
 /** A network or connection error occurred. */
 export class OJSConnectionError extends OJSError {
-  constructor(message: string, cause?: Error) {
-    super(message, 'connection_error', { retryable: true, cause });
+  constructor(
+    message: string,
+    cause?: Error,
+    details?: Record<string, unknown>,
+  ) {
+    super(message, 'connection_error', { retryable: true, cause, details });
     this.name = 'OJSConnectionError';
+  }
+}
+
+/**
+ * A client-side request exceeded its configured timeout before the server
+ * responded (or before the response body finished streaming). This is the
+ * transport's *own* internal deadline firing — distinct from an external
+ * caller-supplied `AbortSignal` cancellation, which surfaces its own abort
+ * reason unchanged and is never retried.
+ *
+ * It extends {@link OJSConnectionError} so existing `instanceof
+ * OJSConnectionError` handling keeps treating it as a retryable transient
+ * connection failure (backward compatible), while `name`, `timeoutMs`,
+ * `path`, and structured `details` (`timeout_ms`/`path`) let callers
+ * identify a timeout specifically rather than receiving an opaque,
+ * reason-less `AbortError`.
+ */
+export class OJSRequestTimeoutError extends OJSConnectionError {
+  /** The elapsed timeout duration in milliseconds. */
+  readonly timeoutMs: number;
+  /** The logical request path that timed out. */
+  readonly path: string;
+
+  constructor(timeoutMs: number, path: string, cause?: Error) {
+    super(`Request to '${path}' timed out after ${timeoutMs}ms.`, cause, {
+      timeout_ms: timeoutMs,
+      path,
+    });
+    this.name = 'OJSRequestTimeoutError';
+    this.timeoutMs = timeoutMs;
+    this.path = path;
   }
 }
 
@@ -130,6 +183,118 @@ export class OJSTimeoutError extends OJSError {
       { retryable: true, details: { job_id: jobId, timeout_ms: timeoutMs } },
     );
     this.name = 'OJSTimeoutError';
+  }
+}
+
+/**
+ * Loading an existing durable-execution checkpoint failed for a reason
+ * other than "no checkpoint exists yet" ({@link OJSNotFoundError}). This
+ * covers network/connection failures, authentication/authorization
+ * failures, malformed/undecodable responses, and server-side (5xx)
+ * errors from the canonical checkpoint endpoint.
+ *
+ * Unlike a 404 (which legitimately means "this is the job's first
+ * execution" and is handled silently), any other failure here means the
+ * SDK genuinely does not know whether a checkpoint exists. Silently
+ * treating that as "start fresh" would risk re-executing non-idempotent
+ * side effects that were already recorded — a correctness violation of
+ * durable execution's exactly-once-recording guarantee. {@link
+ * DurableContext.create} therefore throws this error instead, so the
+ * caller (typically `OJSWorker.registerDurable`) never invokes the user
+ * handler and the job is nacked for retry instead.
+ *
+ * The original failure is preserved as `.cause` (so `instanceof`
+ * checks against e.g. {@link OJSConnectionError}/{@link OJSServerError}
+ * still work against `error.cause`), and `retryable` mirrors the
+ * underlying error's own classification when it is an {@link OJSError}
+ * (defaulting to `true` for unclassified errors, since a transient
+ * lookup failure is the common case).
+ */
+export class OJSCheckpointLoadError extends OJSError {
+  /** The job whose checkpoint could not be loaded. */
+  readonly jobId: string;
+  /** The attempt number the checkpoint load was performed for. */
+  readonly attempt: number;
+
+  constructor(
+    jobId: string,
+    attempt: number,
+    cause: unknown,
+    source: 'canonical' | 'legacy' = 'canonical',
+  ) {
+    const causeError = cause instanceof Error ? cause : new Error(String(cause));
+    const retryable = cause instanceof OJSError ? cause.retryable : true;
+    const checkpointLabel = source === 'legacy' ? 'legacy checkpoint' : 'checkpoint';
+    super(
+      `Failed to load ${checkpointLabel} for job '${jobId}' (attempt ${attempt}): ${causeError.message}`,
+      'checkpoint_load_failed',
+      {
+        retryable,
+        details: source === 'legacy'
+          ? { job_id: jobId, attempt, checkpoint_source: source }
+          : { job_id: jobId, attempt },
+        cause: causeError,
+      },
+    );
+    this.name = 'OJSCheckpointLoadError';
+    this.jobId = jobId;
+    this.attempt = attempt;
+  }
+}
+
+/**
+ * The durable handler requested a different replay operation than the next
+ * checkpoint entry. Executing the live operation would corrupt deterministic
+ * replay, so this error is non-retryable until the handler/checkpoint mismatch
+ * is resolved.
+ */
+export class ReplayIntegrityError extends OJSError {
+  readonly jobId: string;
+  readonly attempt: number;
+  readonly position: number;
+  readonly expectedType: string;
+  readonly actualType: string;
+  readonly expectedKey: string | undefined;
+  readonly actualKey: string | undefined;
+
+  constructor(
+    jobId: string,
+    attempt: number,
+    position: number,
+    expectedType: string,
+    actualType: string,
+    expectedKey?: string,
+    actualKey?: string,
+  ) {
+    const keyMismatch = expectedType === actualType && expectedKey !== actualKey;
+    const mismatch = keyMismatch
+      ? `checkpoint key is ${JSON.stringify(actualKey)} but handler requested ${JSON.stringify(expectedKey)}`
+      : `checkpoint type is '${actualType}' but handler requested '${expectedType}'`;
+
+    super(
+      `Durable replay mismatch for job '${jobId}' (attempt ${attempt}) at position ${position}: ${mismatch}.`,
+      'replay_integrity_error',
+      {
+        retryable: false,
+        details: {
+          job_id: jobId,
+          attempt,
+          position,
+          expected_type: expectedType,
+          actual_type: actualType,
+          ...(expectedKey === undefined ? {} : { expected_key: expectedKey }),
+          ...(actualKey === undefined ? {} : { actual_key: actualKey }),
+        },
+      },
+    );
+    this.name = 'ReplayIntegrityError';
+    this.jobId = jobId;
+    this.attempt = attempt;
+    this.position = position;
+    this.expectedType = expectedType;
+    this.actualType = actualType;
+    this.expectedKey = expectedKey;
+    this.actualKey = actualKey;
   }
 }
 
@@ -202,6 +367,9 @@ export function parseErrorResponse(
       (details?.resource_id as string) ?? 'unknown',
       requestId,
     );
+  }
+  if (status === 405) {
+    return new OJSMethodNotAllowedError(message, details, requestId);
   }
   if (status === 409) {
     if (err?.code === 'duplicate') {

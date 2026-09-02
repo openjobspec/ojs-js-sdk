@@ -33,7 +33,11 @@ const jsonValueArb: fc.Arbitrary<JsonValue> = fc.letrec((tie) => ({
   value: fc.oneof(
     { depthSize: 'small' },
     fc.string(),
-    fc.double({ noNaN: true, noDefaultInfinity: true }),
+    // JSON has no distinct representation for negative zero — it always
+    // serializes as "0" — so normalize -0 to 0 at generation time. Without
+    // this, roundtrip-fidelity properties below flake under vitest's
+    // Object.is-based toEqual, which (unlike ==) treats -0 !== 0.
+    fc.double({ noNaN: true, noDefaultInfinity: true }).map((n) => (Object.is(n, -0) ? 0 : n)),
     fc.boolean(),
     fc.constant(null),
     fc.array(tie('value') as fc.Arbitrary<JsonValue>, { maxLength: 5 }),
