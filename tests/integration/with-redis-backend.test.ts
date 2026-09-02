@@ -49,6 +49,7 @@ describeIntegration('Integration: OJS with Redis Backend', () => {
         { timestamp: Date.now() },
         { queue: 'integration-test' },
       );
+      if (job === null) throw new Error('Expected enqueue result');
 
       expect(job.id).toBeDefined();
       expect(job.type).toBe('integration.test');
@@ -79,6 +80,7 @@ describeIntegration('Integration: OJS with Redis Backend', () => {
         {},
         { queue: 'integration-test' },
       );
+      if (job === null) throw new Error('Expected enqueue result');
 
       const cancelled = await client.cancelJob(job.id);
       expect(cancelled.state).toBe('cancelled');
@@ -93,6 +95,7 @@ describeIntegration('Integration: OJS with Redis Backend', () => {
         { message: 'hello' },
         { queue: 'integration-test' },
       );
+      if (enqueued === null) throw new Error('Expected enqueue result');
 
       // Register handler and start worker
       let processedJobId: string | null = null;

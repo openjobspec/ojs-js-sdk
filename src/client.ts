@@ -7,13 +7,17 @@
 import { HttpTransport } from './transport/http.js';
 import type { Transport } from './transport/types.js';
 import type { RetryConfig } from './rate-limiter.js';
-import type {
-  Job,
-  JobSpec,
-  EnqueueOptions,
-  JsonValue,
+import {
+  createEnqueueEnvelope,
+  normalizeArgs,
+  normalizeJobResponse,
+  toWireEnqueueRequest,
+  type Job,
+  type JobSpec,
+  type EnqueueOptions,
+  type JsonValue,
+  type WireEnqueueRequest,
 } from './job.js';
-import { normalizeArgs, toWireOptions } from './job.js';
 import {
   MiddlewareChain,
   composeEnqueue,
@@ -23,14 +27,17 @@ import { QueueOperations } from './queue.js';
 import { CronOperations } from './cron.js';
 import { SchemaOperations } from './schema.js';
 import { OJSEventEmitter } from './events.js';
-import { validateEnqueueRequest } from './validation/schemas.js';
-import { OJSValidationError } from './errors.js';
 import type {
   WorkflowDefinition,
   WorkflowStatus,
 } from './workflow.js';
-import { toWireWorkflow } from './workflow.js';
-import { isTestMode, _recordEnqueue, _toJob } from './testing.js';
+import { normalizeWorkflowStatus, toWireWorkflow } from './workflow.js';
+import {
+  isTestMode,
+  _recordEnqueueEnvelope,
+  _toJob,
+} from './testing.js';
+import { OJSConnectionError } from './errors.js';
 
 /** Configuration options for OJSClient. */
 export interface OJSClientConfig {
@@ -91,12 +98,13 @@ export class OJSClient {
    * @param type - The dot-namespaced job type (e.g., 'email.send').
    * @param args - The job arguments. Objects/primitives are wrapped in an array for the wire format.
    * @param options - Optional enqueue options (queue, retry, delay, etc.).
-   * @returns The enqueued job as returned by the server.
+   * @returns The enqueued job, or `null` when enqueue middleware drops it.
    *
    * @example
    * ```ts
    * // Untyped (default)
    * const job = await client.enqueue('email.send', { to: 'user@example.com' });
+   * if (job === null) console.log('Job was dropped by middleware');
    *
    * // Typed args for compile-time safety
    * interface EmailPayload { to: string; subject: string }
@@ -107,77 +115,51 @@ export class OJSClient {
     type: string,
     args: T | T[] = [] as unknown as T,
     options?: EnqueueOptions,
-  ): Promise<Job> {
+  ): Promise<Job | null> {
     const wireArgs = normalizeArgs(args);
+    const envelope = createEnqueueEnvelope(type, wireArgs, options);
+    const run = composeEnqueue(
+      this.enqueueMiddleware.entries(),
+      (job) => this.terminalEnqueue(job),
+    );
+    // The middleware onion terminates in the real transport/test-mode
+    // enqueue, so `await next()` inside a middleware resolves to the actual
+    // created Job (server-assigned id/state) — or rejects with the transport
+    // error. Post-next mutations therefore only affect the value the
+    // outermost middleware returns to the caller; they are never re-sent,
+    // because serialization already happened when `next()` reached the
+    // terminal below.
+    return run(envelope);
+  }
 
-    // In test mode, record the job in memory instead of sending HTTP
+  /**
+   * The terminal of the enqueue middleware onion: serialize/validate the
+   * post-middleware envelope, then perform the single real enqueue (test
+   * mode records in memory; otherwise one `POST /jobs`). Returns the actual
+   * created Job. Validation runs first so an invalid post-middleware
+   * envelope rejects `next()` before any transport or in-memory write.
+   */
+  private async terminalEnqueue(job: Job): Promise<Job> {
+    const body = toWireEnqueueRequest(job);
+
     if (isTestMode()) {
-      const fakeJob = await _recordEnqueue(type, wireArgs, options);
+      const fakeJob = await _recordEnqueueEnvelope(job);
       return _toJob(fakeJob);
     }
 
-    const wireOptions = toWireOptions(options);
+    const response = await this.transport.request<{ job: Job }>({
+      method: 'POST',
+      path: '/jobs',
+      body,
+    });
 
-    // Build the job envelope for middleware
-    const jobEnvelope: Job = {
-      specversion: '1.0',
-      id: '', // Server assigns
-      type,
-      queue: options?.queue ?? 'default',
-      args: wireArgs,
-      ...(options?.meta !== undefined ? { meta: options.meta } : {}),
-    };
-
-    // Run through enqueue middleware chain
-    const composedEnqueue = composeEnqueue(
-      this.enqueueMiddleware.entries(),
-      async (job) => {
-        // Client-side validation
-        const validationPayload: {
-          type: string;
-          args: JsonValue[];
-          options?: { queue?: string };
-        } = {
-          type: job.type,
-          args: job.args,
-        };
-        if (wireOptions !== undefined) {
-          validationPayload.options = wireOptions as { queue?: string };
-        }
-        const errors = validateEnqueueRequest(validationPayload);
-        if (errors.length > 0) {
-          throw new OJSValidationError(
-            errors.map((e) => e.message).join('; '),
-            { validation_errors: errors },
-          );
-        }
-
-        // Build the wire request body
-        const body: Record<string, unknown> = {
-          type: job.type,
-          args: job.args,
-        };
-        if (job.meta && Object.keys(job.meta).length > 0) body.meta = job.meta;
-        if (wireOptions) body.options = wireOptions;
-
-        const response = await this.transport.request<{ job: Job }>({
-          method: 'POST',
-          path: '/jobs',
-          body,
-        });
-
-        return response.body.job;
-      },
-    );
-
-    const result = await composedEnqueue(jobEnvelope);
-    return result as Job;
+    return normalizeJobResponse(response.body.job);
   }
 
   /**
    * Enqueue multiple jobs in a single atomic operation.
    *
-   * @param jobs - Array of job specifications.
+   * @param specs - Array of job specifications.
    * @returns Array of enqueued jobs as returned by the server.
    *
    * @example
@@ -189,36 +171,196 @@ export class OJSClient {
    * ```
    */
   async enqueueBatch(specs: JobSpec[]): Promise<Job[]> {
-    // In test mode, record each job in memory
-    if (isTestMode()) {
-      const jobs: Job[] = [];
-      for (const spec of specs) {
-        const wireArgs = normalizeArgs(spec.args ?? []);
-        const fakeJob = await _recordEnqueue(spec.type, wireArgs, spec.options);
-        jobs.push(_toJob(fakeJob));
-      }
-      return jobs;
+    const envelopes = specs.map((spec) =>
+      createEnqueueEnvelope(
+        spec.type,
+        normalizeArgs(spec.args ?? []),
+        spec.options,
+      ),
+    );
+    const n = envelopes.length;
+    if (n === 0) return [];
+
+    // Barrier/deferred orchestration: every per-job middleware chain runs
+    // to a terminal decision (send / drop / error) *before* any transport
+    // call, then one atomic batch request is issued, each chain's terminal
+    // is resolved with its corresponding response Job in order, and finally
+    // the chains are awaited so their post-next code observes the response.
+    const terminals: (BatchTerminal | undefined)[] = new Array(n);
+    const decided: boolean[] = new Array(n).fill(false);
+    const dropped: boolean[] = new Array(n).fill(false);
+    const chainError: unknown[] = new Array(n);
+    const hasChainError: boolean[] = new Array(n).fill(false);
+    const finalResults: (Job | null)[] = new Array(n);
+    const gateResolvers: (() => void)[] = new Array(n);
+    const gates: Promise<void>[] = [];
+    const chains: Promise<void>[] = [];
+
+    for (let i = 0; i < n; i++) {
+      const idx = i;
+      gates.push(
+        new Promise<void>((resolve) => {
+          gateResolvers[idx] = resolve;
+        }),
+      );
+
+      // Each job's batch terminal is the single atomic-batch transport slot
+      // for that item and may be *reached* only once. A retry-style enqueue
+      // middleware that catches a validation or transport rejection and calls
+      // next() again would otherwise re-enter this terminal. When that
+      // happens the one atomic batch request was already attempted (or was
+      // never issued because validation failed synchronously), so we must
+      // NOT register a fresh deferred — doing so would hang forever waiting
+      // for a second transport cycle that never comes and would strand
+      // `Promise.allSettled(chains)`. Instead we reject immediately with the
+      // ORIGINAL terminal error and never replace the recorded deferred.
+      //
+      // NOTE: whole-batch transport retry is intentionally unsupported (see
+      // AUDIT.md §4ae). Middleware may retry its own pre-terminal handler
+      // work, but it cannot retry an already-attempted atomic batch send.
+      let terminalReached = false;
+      let terminalError: unknown;
+      let hasTerminalError = false;
+      const recordTerminalError = (error: unknown): void => {
+        if (!hasTerminalError) {
+          hasTerminalError = true;
+          terminalError = error;
+        }
+      };
+
+      const terminal = (job: Job): Promise<Job> => {
+        if (terminalReached) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- forwards the ORIGINAL terminal error verbatim (an intentionally `unknown` thrown value from transport/validation) so a retry sees the identical failure object.
+          return Promise.reject(
+            hasTerminalError
+              ? terminalError
+              : new OJSConnectionError(
+                  'Batch enqueue terminal re-invoked before its single ' +
+                    'atomic transport attempt settled; whole-batch transport ' +
+                    'retry is not supported.',
+                ),
+          );
+        }
+        terminalReached = true;
+
+        // Serialize/validate now so a bad post-middleware envelope aborts
+        // the whole batch before any transport call (the synchronous throw
+        // rejects this chain, which the barrier below treats as an error).
+        // Capture that validation failure as the original terminal error so
+        // a retry re-invoking the terminal observes the same deterministic
+        // rejection instead of re-running validation.
+        let body: WireEnqueueRequest;
+        try {
+          body = toWireEnqueueRequest(job);
+        } catch (error) {
+          recordTerminalError(error);
+          throw error;
+        }
+        return new Promise<Job>((resolve, reject) => {
+          terminals[idx] = {
+            job,
+            body,
+            resolve,
+            reject: (error: unknown) => {
+              recordTerminalError(error);
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the batch transport rejects each terminal with its ORIGINAL (`unknown`) error; forwarding it verbatim is required so callers observe the exact failure object.
+              reject(error);
+            },
+          };
+          decided[idx] = true;
+          gateResolvers[idx]!();
+        });
+      };
+
+      const run = composeEnqueue(this.enqueueMiddleware.entries(), terminal);
+      chains.push(
+        run(envelopes[idx]!).then(
+          (result) => {
+            finalResults[idx] = result;
+            if (!decided[idx]) {
+              // The chain settled without reaching the terminal: a drop
+              // (returned null) or a short-circuit value never sent.
+              dropped[idx] = result === null;
+              decided[idx] = true;
+              gateResolvers[idx]!();
+            }
+          },
+          (error: unknown) => {
+            hasChainError[idx] = true;
+            chainError[idx] = error;
+            decided[idx] = true;
+            gateResolvers[idx]!();
+          },
+        ),
+      );
     }
 
-    const wireJobs = specs.map((spec) => {
-      const wireArgs = normalizeArgs(spec.args ?? []);
-      const wireOptions = toWireOptions(spec.options);
+    // Wait until every chain has reached a terminal or settled.
+    await Promise.all(gates);
 
-      const body: Record<string, unknown> = {
-        type: spec.type,
-        args: wireArgs,
-      };
-      if (wireOptions) body.options = wireOptions;
-      return body;
-    });
+    // Any middleware/validation error aborts the whole batch before any
+    // transport call. Reject terminals still awaiting so their chains unwind.
+    const firstError = hasChainError.findIndex((flag) => flag);
+    if (firstError !== -1) {
+      const error = chainError[firstError];
+      for (const terminal of terminals) terminal?.reject(error);
+      await Promise.allSettled(chains);
+      throw error;
+    }
 
-    const response = await this.transport.request<{ jobs: Job[] }>({
-      method: 'POST',
-      path: '/jobs/batch',
-      body: { jobs: wireJobs },
-    });
+    const sendIndices: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (terminals[i] && !dropped[i]) sendIndices.push(i);
+    }
 
-    return response.body.jobs;
+    if (sendIndices.length > 0) {
+      if (isTestMode()) {
+        for (const i of sendIndices) {
+          const terminal = terminals[i]!;
+          const fakeJob = await _recordEnqueueEnvelope(terminal.job);
+          terminal.resolve(_toJob(fakeJob));
+        }
+      } else {
+        let responseJobs: Job[];
+        try {
+          const response = await this.transport.request<{ jobs: Job[] }>({
+            method: 'POST',
+            path: '/jobs/batch',
+            body: { jobs: sendIndices.map((i) => terminals[i]!.body) },
+          });
+          responseJobs = response.body.jobs.map(normalizeJobResponse);
+          if (responseJobs.length !== sendIndices.length) {
+            throw new OJSConnectionError(
+              `Batch enqueue returned ${responseJobs.length} jobs for ${sendIndices.length} requests.`,
+            );
+          }
+        } catch (error) {
+          // A transport failure must be observable by every terminal's
+          // post-next code and must reject the whole batch.
+          for (const i of sendIndices) terminals[i]!.reject(error);
+          await Promise.allSettled(chains);
+          throw error;
+        }
+        sendIndices.forEach((i, position) => {
+          terminals[i]!.resolve(responseJobs[position]!);
+        });
+      }
+    }
+
+    // Let each chain's post-next code run (observe the response Job, apply
+    // return-only mutations) before assembling results.
+    await Promise.allSettled(chains);
+
+    const postError = hasChainError.findIndex((flag) => flag);
+    if (postError !== -1) throw chainError[postError];
+
+    const results: Job[] = [];
+    for (let i = 0; i < n; i++) {
+      if (dropped[i]) continue;
+      const result = finalResults[i];
+      if (result != null) results.push(result);
+    }
+    return results;
   }
 
   // ---- Job Info ----
@@ -234,7 +376,7 @@ export class OJSClient {
       method: 'GET',
       path: `/jobs/${encodeURIComponent(jobId)}`,
     });
-    return response.body.job;
+    return normalizeJobResponse(response.body.job);
   }
 
   /**
@@ -248,7 +390,7 @@ export class OJSClient {
       method: 'DELETE',
       path: `/jobs/${encodeURIComponent(jobId)}`,
     });
-    return response.body.job;
+    return normalizeJobResponse(response.body.job);
   }
 
   // ---- Workflows ----
@@ -275,24 +417,24 @@ export class OJSClient {
   async workflow(definition: WorkflowDefinition): Promise<WorkflowStatus> {
     const wire = toWireWorkflow(definition);
 
-    const response = await this.transport.request<WorkflowStatus>({
+    const response = await this.transport.request<WorkflowResponseEnvelope>({
       method: 'POST',
       path: '/workflows',
       body: wire,
     });
 
-    return response.body;
+    return unwrapWorkflowResponse(response.body);
   }
 
   /**
    * Get the status of a workflow.
    */
   async getWorkflow(workflowId: string): Promise<WorkflowStatus> {
-    const response = await this.transport.request<WorkflowStatus>({
+    const response = await this.transport.request<WorkflowResponseEnvelope>({
       method: 'GET',
       path: `/workflows/${encodeURIComponent(workflowId)}`,
     });
-    return response.body;
+    return unwrapWorkflowResponse(response.body);
   }
 
   /**
@@ -356,5 +498,50 @@ export class OJSClient {
   get middleware(): MiddlewareChain<EnqueueMiddleware> {
     return this.enqueueMiddleware;
   }
+
 }
 
+/**
+ * One per-job entry of an in-flight batch: the post-middleware envelope, its
+ * validated wire body, and the deferred `resolve`/`reject` that the shared
+ * batch transport step calls with the item's corresponding response Job (or
+ * the transport error) once all chains have reached a terminal decision.
+ */
+interface BatchTerminal {
+  job: Job;
+  body: WireEnqueueRequest;
+  resolve: (job: Job) => void;
+  reject: (error: unknown) => void;
+}
+
+// ---- Workflow response envelope ----
+//
+// Both `ojs-http-binding.md` §14.1/14.2 and the `GrpcTransport`'s
+// `grpcCreateWorkflow`/`grpcGetWorkflow` (see src/transport/grpc.ts) wrap
+// the workflow status in a `{ workflow: {...} }` envelope, matching the
+// same shape as every other create/get response in the spec. A raw
+// per-field `WorkflowStatus` (with no `workflow` wrapper) is also
+// tolerated for backward compatibility with any server/test double that
+// was built against the previous unwrapped behavior.
+
+/** The `{ workflow: WorkflowStatus }` envelope both transports use for
+ * `POST /workflows` and `GET /workflows/:id`. */
+interface WorkflowResponseEnvelope {
+  workflow?: WorkflowStatus;
+}
+
+/**
+ * Unwraps a `{ workflow: WorkflowStatus }` envelope into the bare
+ * `WorkflowStatus` the public `OJSClient.workflow()`/`getWorkflow()` API
+ * returns. A response body without a `workflow` property is treated as
+ * already being the flat `WorkflowStatus` itself — tolerated for
+ * backward compatibility with servers/tests that predate the envelope.
+ */
+function unwrapWorkflowResponse(
+  body: WorkflowResponseEnvelope | WorkflowStatus,
+): WorkflowStatus {
+  if (body && typeof body === 'object' && 'workflow' in body && body.workflow) {
+    return normalizeWorkflowStatus(body.workflow);
+  }
+  return normalizeWorkflowStatus(body as WorkflowStatus);
+}

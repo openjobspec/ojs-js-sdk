@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { CronOperations } from '../src/cron.js';
+import { OJSValidationError } from '../src/errors.js';
 import type { Transport, TransportRequestOptions, TransportResponse } from '../src/transport/types.js';
 
 function createMockTransport() {
@@ -178,6 +179,27 @@ describe('CronOperations', () => {
       expect(body.timezone).toBeUndefined();
       expect(body.meta).toBeUndefined();
       expect(body.options).toBeUndefined();
+    });
+
+    it.each([
+      ['developer spelling', { expiresAt: '2030-01-01T00:00:00Z' }],
+      ['wire spelling', { expires_at: '2030-01-01T00:00:00Z' }],
+    ])('rejects %s before calling the transport', async (_label, options) => {
+      await expect(
+        cron.register({
+          name: 'expiring-cron',
+          cron: '@daily',
+          type: 'report.generate',
+          args: [],
+          options,
+        } as never),
+      ).rejects.toMatchObject({
+        name: 'OJSValidationError',
+        code: 'invalid_request',
+        retryable: false,
+        message: expect.stringMatching(/materialized later|shift/i),
+      });
+      expect(mock.requests).toHaveLength(0);
     });
   });
 
