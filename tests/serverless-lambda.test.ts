@@ -4,13 +4,16 @@ import type { SQSEvent, SQSBatchResponse } from '../src/serverless/lambda.js';
 
 describe('Lambda serverless adapter', () => {
   beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(null, { status: 204 })),
+    );
   });
 
   describe('sqsHandler', () => {
     it('processes valid SQS records', async () => {
       const processed: string[] = [];
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('email.send', async (ctx) => {
         processed.push(ctx.job.id);
       });
@@ -37,7 +40,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('reports failures for invalid JSON records', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('test', async () => {});
 
       const event: SQSEvent = {
@@ -53,7 +56,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('reports failures for unregistered job types', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
 
       const event: SQSEvent = {
         Records: [
@@ -77,7 +80,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('handles partial batch failures', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('good.job', async () => {});
       handler.register('bad.job', async () => {
         throw new Error('handler failure');
@@ -107,7 +110,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('handles empty SQS event', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       const result = await handler.sqsHandler({ Records: [] });
       expect(result.batchItemFailures).toHaveLength(0);
     });
@@ -116,7 +119,7 @@ describe('Lambda serverless adapter', () => {
   describe('httpHandler', () => {
     it('processes valid HTTP push delivery', async () => {
       const processed: string[] = [];
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('email.send', async (ctx) => {
         processed.push(ctx.job.id);
       });
@@ -139,7 +142,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('rejects non-POST methods', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
 
       const result = await handler.httpHandler({
         requestContext: { http: { method: 'GET' } },
@@ -149,7 +152,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('returns 400 for invalid body', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
 
       const result = await handler.httpHandler({
         requestContext: { http: { method: 'POST' } },
@@ -159,31 +162,37 @@ describe('Lambda serverless adapter', () => {
       expect(result.statusCode).toBe(400);
     });
 
-    it('calls ack on success', async () => {
-      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    it('returns the push protocol completed response on success without any OJS server callback', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
       vi.stubGlobal('fetch', fetchSpy);
 
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('ack.test', async () => {});
 
-      await handler.httpHandler({
+      const result = await handler.httpHandler({
         requestContext: { http: { method: 'POST' } },
         body: JSON.stringify({
           job: { id: 'j-ack', type: 'ack.test', args: [], queue: 'q', state: 'active' },
         }),
       });
 
-      expect(fetchSpy).toHaveBeenCalledWith(
-        'http://ojs.test/ojs/v1/jobs/j-ack/ack',
-        expect.objectContaining({ method: 'POST' }),
-      );
+      // The HTTP push protocol response is now the sole state-transition
+      // signal; the handler no longer performs a follow-up OJS
+      // `/workers/ack` callback request. The backend that pushed this job
+      // derives the state transition from the returned response.
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body as string)).toEqual({
+        status: 'completed',
+        job_id: 'j-ack',
+      });
     });
 
-    it('calls nack on handler failure', async () => {
-      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    it('returns a structured HTTP 200 failed response on handler failure without any OJS server callback', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
       vi.stubGlobal('fetch', fetchSpy);
 
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('fail.test', async () => {
         throw new Error('processing failed');
       });
@@ -195,36 +204,52 @@ describe('Lambda serverless adapter', () => {
         }),
       });
 
-      expect(fetchSpy).toHaveBeenCalledWith(
-        'http://ojs.test/ojs/v1/jobs/j-nack/nack',
-        expect.objectContaining({ method: 'POST' }),
-      );
-      const body = JSON.parse(result.body as string);
-      expect(body.status).toBe('failed');
+      // Neither an ACK nor a NACK callback is ever issued; the backend
+      // derives the failed transition from this HTTP 200 response alone.
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body as string)).toEqual({
+        status: 'failed',
+        job_id: 'j-nack',
+        error: {
+          code: 'handler_error',
+          message: 'processing failed',
+          retryable: true,
+        },
+      });
     });
 
-    it('sends auth header when apiKey provided', async () => {
-      const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    it('never calls fetch even when apiKey/url/callbackTimeoutMs are configured (deprecated, unused options)', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
       vi.stubGlobal('fetch', fetchSpy);
 
-      const handler = createLambdaHandler({ url: 'http://ojs.test', apiKey: 'secret' });
+      const handler = createLambdaHandler({
+        url: 'http://ojs.test',
+        apiKey: 'secret',
+        callbackTimeoutMs: 1234,
+        allowInsecurePush: true,
+      });
       handler.register('auth.test', async () => {});
 
-      await handler.httpHandler({
+      const result = await handler.httpHandler({
         requestContext: { http: { method: 'POST' } },
         body: JSON.stringify({
           job: { id: 'j-auth', type: 'auth.test', args: [], queue: 'q', state: 'active' },
         }),
       });
 
-      const callHeaders = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
-      expect(callHeaders['Authorization']).toBe('Bearer secret');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body as string)).toEqual({
+        status: 'completed',
+        job_id: 'j-auth',
+      });
     });
   });
 
   describe('directHandler', () => {
     it('processes direct invocation', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('direct.test', async () => {});
 
       const result = await handler.directHandler({
@@ -240,7 +265,7 @@ describe('Lambda serverless adapter', () => {
     });
 
     it('returns failure on handler error', async () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('fail.direct', async () => {
         throw new Error('direct failure');
       });
@@ -260,7 +285,7 @@ describe('Lambda serverless adapter', () => {
 
   describe('register', () => {
     it('allows registering multiple handlers', () => {
-      const handler = createLambdaHandler({ url: 'http://ojs.test' });
+      const handler = createLambdaHandler({ url: 'http://ojs.test', allowInsecurePush: true });
       handler.register('type.a', async () => {});
       handler.register('type.b', async () => {});
       // No throw = success
