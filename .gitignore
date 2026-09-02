@@ -4,6 +4,7 @@ docs/
 *.tgz
 .DS_Store
 coverage/
+.package-smoke/
 
 # Stray nested clones (defensive)
 ojs-js-sdk/
