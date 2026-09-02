@@ -36,7 +36,11 @@ client.useEnqueue('logging', async (job, next) => {
 
 // Enqueue with middleware active
 const job = await client.enqueue('email.send', { to: 'user@example.com' });
-console.log(`Job meta:`, job.meta);
+if (job === null) {
+  console.log('Job was dropped before enqueue');
+} else {
+  console.log(`Job meta:`, job.meta);
+}
 
 // ---- Worker-side execution middleware ----
 

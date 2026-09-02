@@ -10,6 +10,7 @@ const client = new OJSClient({ url: 'http://localhost:8080' });
 
 // --- Simple enqueue ---
 const job = await client.enqueue('email.send', { to: 'user@example.com' });
+if (job === null) throw new Error('email.send was dropped by middleware');
 console.log(`Enqueued job: ${job.id} (state: ${job.state})`);
 
 // --- Enqueue with options ---
@@ -20,10 +21,17 @@ const reportJob = await client.enqueue(
     queue: 'reports',
     delay: '5m',
     retry: { maxAttempts: 5, backoff: 'exponential' },
-    unique: { key: ['id'], period: 'PT1H' },
+    unique: {
+      keys: ['type', 'args'],
+      argsKeys: ['id'],
+      period: 'PT1H',
+    },
     tags: ['analytics', 'monthly'],
   },
 );
+if (reportJob === null) {
+  throw new Error('report.generate was dropped by middleware');
+}
 console.log(`Scheduled report job: ${reportJob.id}`);
 
 // --- Batch enqueue ---
