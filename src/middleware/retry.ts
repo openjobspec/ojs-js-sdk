@@ -16,6 +16,7 @@
  */
 
 import type { ExecutionMiddleware, JobContext, NextFunction } from '../middleware.js';
+import { getTimeoutSettlement } from './timeout-settlement.js';
 
 /** Options for the retry middleware. */
 export interface RetryOptions {
@@ -29,8 +30,59 @@ export interface RetryOptions {
   jitter?: boolean;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function abortReason(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error
+    ? reason
+    : new Error('The operation was aborted', { cause: reason });
+}
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(abortReason(signal));
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = (): void => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      signal.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = (): void => {
+      cleanup();
+      reject(abortReason(signal));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+  });
+}
+
+async function settlesWithin(
+  settlement: Promise<void>,
+  graceMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      settlement.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), graceMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 /**
@@ -46,7 +98,7 @@ export function retry(options?: RetryOptions): ExecutionMiddleware {
   const maxDelayMs = options?.maxDelayMs ?? 30_000;
   const useJitter = options?.jitter ?? true;
 
-  return async (_ctx: JobContext, next: NextFunction): Promise<unknown> => {
+  return async (ctx: JobContext, next: NextFunction): Promise<unknown> => {
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -59,13 +111,24 @@ export function retry(options?: RetryOptions): ExecutionMiddleware {
           break;
         }
 
+        const timeoutLifecycle = getTimeoutSettlement(error);
+        if (
+          timeoutLifecycle &&
+          !(await settlesWithin(
+            timeoutLifecycle.settlement,
+            timeoutLifecycle.settlementGraceMs,
+          ))
+        ) {
+          throw error;
+        }
+
         const exponentialDelay = baseDelayMs * Math.pow(2, attempt);
         const cappedDelay = Math.min(exponentialDelay, maxDelayMs);
         const finalDelay = useJitter
           ? cappedDelay * (0.5 + Math.random() * 0.5)
           : cappedDelay;
 
-        await delay(finalDelay);
+        await delay(finalDelay, ctx.signal);
       }
     }
 

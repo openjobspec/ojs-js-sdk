@@ -8,6 +8,7 @@ import {
   type JobContext,
 } from '../src/middleware.js';
 import type { Job } from '../src/job.js';
+import { retry } from '../src/middleware/retry.js';
 
 function createTestContext(overrides: Partial<JobContext> = {}): JobContext {
   return {
@@ -181,13 +182,19 @@ describe('composeExecution', () => {
     expect(caughtErrors).toEqual(['handler failed']);
   });
 
-  it('should reject when next() is called multiple times', async () => {
+  it('should reject when next() is called concurrently before the first call settles', async () => {
     const middlewares = [
       {
         name: 'bad',
         fn: async (_ctx: JobContext, next: () => Promise<unknown>) => {
-          await next();
-          return next(); // Second call should throw
+          // Fires next() twice without awaiting the first — this would run
+          // the remaining chain (and the handler) concurrently against the
+          // same shared context, which is the actual bug class the guard
+          // exists to catch.
+          const first = next();
+          const second = next();
+          await first;
+          return second;
         },
       },
     ];
@@ -198,6 +205,238 @@ describe('composeExecution', () => {
     await expect(composed(createTestContext())).rejects.toThrow(
       'next() called multiple times',
     );
+  });
+
+  it('should allow next() to be called again sequentially after the previous call settles', async () => {
+    // This is the pattern the built-in retry middleware (middleware/retry.ts)
+    // relies on: catch a failure from next() and call next() again to re-run
+    // the downstream chain. It must not be confused with the concurrent
+    // reentrancy case above.
+    let calls = 0;
+    const middlewares = [
+      {
+        name: 'retry-once',
+        fn: async (_ctx: JobContext, next: () => Promise<unknown>) => {
+          try {
+            return await next();
+          } catch {
+            return next();
+          }
+        },
+      },
+    ];
+
+    const handler = async () => {
+      calls++;
+      if (calls === 1) throw new Error('first attempt fails');
+      return 'ok-on-retry';
+    };
+
+    const composed = composeExecution(middlewares, handler);
+    const result = await composed(createTestContext());
+
+    expect(result).toBe('ok-on-retry');
+    expect(calls).toBe(2);
+  });
+
+  it('should clear downstream guards so a synchronous middleware throw can be retried', async () => {
+    let attempts = 0;
+    const throwingMiddleware = ((
+      _ctx: JobContext,
+      next: () => Promise<unknown>,
+    ) => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error('synchronous middleware failure');
+      }
+      return next();
+    }) as ExecutionMiddleware;
+    const middlewares = [
+      {
+        name: 'retry-once',
+        fn: async (_ctx: JobContext, next: () => Promise<unknown>) => {
+          try {
+            return await next();
+          } catch {
+            return next();
+          }
+        },
+      },
+      { name: 'throws-once', fn: throwingMiddleware },
+    ];
+
+    const composed = composeExecution(middlewares, async () => 'recovered');
+
+    await expect(composed(createTestContext())).resolves.toBe('recovered');
+    expect(attempts).toBe(2);
+  });
+
+  it('should convert a direct synchronous handler throw into a rejection', async () => {
+    const handler = (() => {
+      throw new Error('synchronous handler failure');
+    }) as (ctx: JobContext) => Promise<unknown>;
+    const composed = composeExecution([], handler);
+
+    let result: Promise<unknown> | undefined;
+    expect(() => {
+      result = composed(createTestContext());
+    }).not.toThrow();
+    await expect(result).rejects.toThrow('synchronous handler failure');
+  });
+
+  it('should reject a sequential next() call after the previous call already resolved successfully (async middleware)', async () => {
+    // A chain position represents exactly one downstream invocation. Once
+    // that invocation has *succeeded*, there is nothing left to legitimately
+    // retry (unlike the rejection case below), so a second sequential call
+    // must be rejected rather than silently re-running the handler.
+    let handlerCalls = 0;
+    const handler = async () => {
+      handlerCalls++;
+      return 'ok';
+    };
+
+    const middlewares = [
+      {
+        name: 'double-success-call',
+        fn: async (_ctx: JobContext, next: () => Promise<unknown>) => {
+          const first = await next();
+          // The prior call already resolved successfully; calling next()
+          // again for this same position must reject, not re-run the
+          // handler a second time.
+          await expect(next()).rejects.toThrow(
+            'next() called again after it already resolved successfully',
+          );
+          return first;
+        },
+      },
+    ];
+
+    const composed = composeExecution(middlewares, handler);
+    await expect(composed(createTestContext())).resolves.toBe('ok');
+    expect(handlerCalls).toBe(1);
+  });
+
+  it('should reject a sequential next() call after the previous call already resolved successfully (sync-returning middleware)', async () => {
+    // Same guarantee, but exercised through a middleware written as a plain
+    // (non-async) function that returns a promise chain synchronously,
+    // rather than using async/await internally.
+    let handlerCalls = 0;
+    const handler = async () => {
+      handlerCalls++;
+      return 'sync-ok';
+    };
+
+    const doubleCallMiddleware = ((
+      _ctx: JobContext,
+      next: () => Promise<unknown>,
+    ) =>
+      next().then((first) =>
+        next().then(
+          () => {
+            throw new Error('expected the second next() call to reject');
+          },
+          (error: unknown) => {
+            expect((error as Error).message).toContain(
+              'already resolved successfully',
+            );
+            return first;
+          },
+        ),
+      )) as ExecutionMiddleware;
+
+    const composed = composeExecution(
+      [{ name: 'sync-double-call', fn: doubleCallMiddleware }],
+      handler,
+    );
+
+    await expect(composed(createTestContext())).resolves.toBe('sync-ok');
+    expect(handlerCalls).toBe(1);
+  });
+
+  it('should allow a retry after rejection but never after success, across mixed sync/async attempts', async () => {
+    // Explicit rejection-then-retry coverage distinct from the
+    // success-then-reject case above: the same position may be re-invoked
+    // any number of times as long as every prior call ended in a rejection,
+    // but the moment one succeeds, the position is consumed.
+    let attempts = 0;
+    const handler = (() => {
+      attempts++;
+      if (attempts === 1) {
+        // Synchronous throw on the first attempt.
+        throw new Error('sync failure on attempt 1');
+      }
+      if (attempts === 2) {
+        // Asynchronous rejection on the second attempt.
+        return Promise.reject(new Error('async failure on attempt 2'));
+      }
+      return Promise.resolve('third-time-lucky');
+    }) as (ctx: JobContext) => Promise<unknown>;
+
+    const middlewares = [
+      {
+        name: 'retry-until-success-then-stop',
+        fn: async (_ctx: JobContext, next: () => Promise<unknown>) => {
+          let result: unknown;
+          for (;;) {
+            try {
+              result = await next();
+              break;
+            } catch {
+              continue;
+            }
+          }
+          // The handler has now succeeded; a further retry must reject.
+          await expect(next()).rejects.toThrow(
+            'already resolved successfully',
+          );
+          return result;
+        },
+      },
+    ];
+
+    const composed = composeExecution(middlewares, handler);
+    await expect(composed(createTestContext())).resolves.toBe(
+      'third-time-lucky',
+    );
+    expect(attempts).toBe(3);
+  });
+
+
+  it('should actually retry the downstream chain when the shipped retry() middleware is composed via a real MiddlewareChain', async () => {
+    // Regression test: retry() (middleware/retry.ts) is only ever exercised
+    // in isolation elsewhere (called directly with a raw `next` closure),
+    // which does not catch bugs in its interaction with the real dispatch
+    // guard above. Wire it through the actual chain/compose machinery.
+    const chain = new MiddlewareChain<ExecutionMiddleware>();
+    chain.add('retry', retry({ maxRetries: 2, baseDelayMs: 1, jitter: false }));
+
+    let attempts = 0;
+    const handler = async () => {
+      attempts++;
+      if (attempts < 3) throw new Error(`fails on attempt ${attempts}`);
+      return 'succeeded';
+    };
+
+    const composed = composeExecution(chain.entries(), handler);
+    const result = await composed(createTestContext());
+
+    expect(result).toBe('succeeded');
+    expect(attempts).toBe(3);
+  });
+
+  it('should propagate the final error once retry() exhausts all attempts through a real chain', async () => {
+    const chain = new MiddlewareChain<ExecutionMiddleware>();
+    chain.add('retry', retry({ maxRetries: 2, baseDelayMs: 1, jitter: false }));
+
+    let attempts = 0;
+    const handler = async () => {
+      attempts++;
+      throw new Error('always fails');
+    };
+
+    const composed = composeExecution(chain.entries(), handler);
+    await expect(composed(createTestContext())).rejects.toThrow('always fails');
+    expect(attempts).toBe(3); // 1 initial + 2 retries
   });
 
   it('should work with no middleware', async () => {
@@ -285,5 +524,127 @@ describe('composeEnqueue', () => {
     await composed(createTestJob());
 
     expect(order).toEqual(['first', 'second', 'enqueue']);
+  });
+
+  it('should clear downstream guards so a synchronous enqueue throw can be retried and dropped', async () => {
+    let attempts = 0;
+    const finalEnqueue = ((job: Job) => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error('synchronous enqueue failure');
+      }
+      return Promise.resolve(null);
+    }) as (job: Job) => Promise<Job | null>;
+    const middlewares = [
+      {
+        name: 'retry-once',
+        fn: async (job: Job, next: (j: Job) => Promise<Job | null>) => {
+          try {
+            return await next(job);
+          } catch {
+            return next(job);
+          }
+        },
+      },
+    ];
+    const composed = composeEnqueue(middlewares, finalEnqueue);
+
+    await expect(composed(createTestJob())).resolves.toBeNull();
+    expect(attempts).toBe(2);
+  });
+
+  it('should convert a direct synchronous final enqueue throw into a rejection', async () => {
+    const finalEnqueue = (() => {
+      throw new Error('synchronous final enqueue failure');
+    }) as (job: Job) => Promise<Job | null>;
+    const composed = composeEnqueue([], finalEnqueue);
+
+    let result: Promise<Job | null> | undefined;
+    expect(() => {
+      result = composed(createTestJob());
+    }).not.toThrow();
+    await expect(result).rejects.toThrow('synchronous final enqueue failure');
+  });
+
+  it('should still reject concurrent enqueue next() calls', async () => {
+    const middlewares = [
+      {
+        name: 'bad',
+        fn: async (job: Job, next: (j: Job) => Promise<Job | null>) => {
+          const first = next(job);
+          const second = next(job);
+          await first;
+          return second;
+        },
+      },
+    ];
+    const composed = composeEnqueue(middlewares, async (job) => job);
+
+    await expect(composed(createTestJob())).rejects.toThrow(
+      'next() called multiple times',
+    );
+  });
+
+  it('should reject a sequential enqueue next() call after the previous call already resolved successfully', async () => {
+    let enqueueCalls = 0;
+    const finalEnqueue = async (job: Job) => {
+      enqueueCalls++;
+      return job;
+    };
+
+    const middlewares = [
+      {
+        name: 'double-success-call',
+        fn: async (job: Job, next: (j: Job) => Promise<Job | null>) => {
+          const first = await next(job);
+          await expect(next(job)).rejects.toThrow(
+            'next() called again after it already resolved successfully',
+          );
+          return first;
+        },
+      },
+    ];
+
+    const composed = composeEnqueue(middlewares, finalEnqueue);
+    const result = await composed(createTestJob());
+
+    expect(result).not.toBeNull();
+    expect(enqueueCalls).toBe(1);
+  });
+
+  it('should allow an enqueue retry after rejection but never after success', async () => {
+    let attempts = 0;
+    const finalEnqueue = ((job: Job) => {
+      attempts++;
+      if (attempts === 1) {
+        // Synchronous throw on the first attempt.
+        throw new Error('sync enqueue failure on attempt 1');
+      }
+      return Promise.resolve(job);
+    }) as (job: Job) => Promise<Job | null>;
+
+    const middlewares = [
+      {
+        name: 'retry-until-success-then-stop',
+        fn: async (job: Job, next: (j: Job) => Promise<Job | null>) => {
+          let result: Job | null;
+          try {
+            result = await next(job);
+          } catch {
+            result = await next(job);
+          }
+          await expect(next(job)).rejects.toThrow(
+            'already resolved successfully',
+          );
+          return result;
+        },
+      },
+    ];
+
+    const composed = composeEnqueue(middlewares, finalEnqueue);
+    const result = await composed(createTestJob());
+
+    expect(result).not.toBeNull();
+    expect(attempts).toBe(2);
   });
 });
