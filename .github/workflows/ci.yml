@@ -20,7 +20,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: node scripts/check-release-please.mjs
       - run: npm run lint
+      - run: npm run test:types
 
   test:
     name: Test (Node ${{ matrix.node-version }})
@@ -66,3 +68,9 @@ jobs:
       - run: npm run build
       - name: Check bundle size
         run: npm run size
+      - name: Verify packed consumers
+        run: npm run check:package
+      - name: Verify package type resolution
+        run: npm run attw
+      - name: Generate API documentation
+        run: npm run docs

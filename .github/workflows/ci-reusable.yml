@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ['18', '20', '22']
-    uses: openjobspec/.github/.github/workflows/ci-node.yml@main
+    uses: openjobspec/.github/.github/workflows/ci-node.yml@baf3b6896d4578c5586ef692daf7958f8e9a2d8a
     with:
       node-version: ${{ matrix.node-version }}
       working-directory: .

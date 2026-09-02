@@ -14,6 +14,6 @@ permissions:
 
 jobs:
   analyze:
-    uses: openjobspec/.github/.github/workflows/codeql.yml@main
+    uses: openjobspec/.github/.github/workflows/codeql.yml@baf3b6896d4578c5586ef692daf7958f8e9a2d8a
     with:
       languages: javascript-typescript

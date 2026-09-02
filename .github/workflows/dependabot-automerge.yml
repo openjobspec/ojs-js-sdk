@@ -11,4 +11,4 @@ permissions:
 jobs:
   automerge:
     if: github.actor == 'dependabot[bot]'
-    uses: openjobspec/.github/.github/workflows/dependabot-automerge.yml@main
+    uses: openjobspec/.github/.github/workflows/dependabot-automerge.yml@baf3b6896d4578c5586ef692daf7958f8e9a2d8a
