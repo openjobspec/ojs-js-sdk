@@ -7,17 +7,25 @@
  */
 
 import { HttpTransport } from './transport/http.js';
-import type { Transport } from './transport/types.js';
-import type { Job, JsonValue, JobError } from './job.js';
+import type { Transport, TransportRequestOptions } from './transport/types.js';
+import {
+  normalizeJobResponse,
+  normalizeHandlerResult,
+  type Job,
+  type JsonValue,
+  type JobError,
+} from './job.js';
 import {
   MiddlewareChain,
   composeExecution,
   type ExecutionMiddleware,
   type JobContext,
 } from './middleware.js';
-import { OJSEventEmitter } from './events.js';
-import { OJSTimeoutError } from './errors.js';
+import { OJSEventEmitter, type OJSEvent, type JobCompletedData } from './events.js';
+import { OJSError, OJSTimeoutError } from './errors.js';
 import { DurableContext, type DurableJobHandler } from './durable.js';
+import { TimeoutError } from './middleware/timeout.js';
+import { generateUuidV4 } from './uuid.js';
 
 /** Worker lifecycle state per the OJS Worker Protocol. */
 export type WorkerState = 'running' | 'quiet' | 'terminate' | 'terminated';
@@ -85,7 +93,7 @@ export class OJSWorker {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private jobsCompleted = 0;
-  private startedAt: number = 0;
+  private startedAt = 0;
   private consecutivePollErrors = 0;
   private shutdownPromise: Promise<void> | null = null;
   private shutdownResolve: (() => void) | null = null;
@@ -102,7 +110,7 @@ export class OJSWorker {
         headers: workerConfig.headers,
       });
 
-    this.workerId = `worker_${crypto.randomUUID()}`;
+    this.workerId = `worker_${generateUuidV4()}`;
 
     this.config = {
       queues: workerConfig.queues ?? ['default'],
@@ -381,7 +389,7 @@ export class OJSWorker {
       },
     });
 
-    const jobs = response.body.jobs ?? [];
+    const jobs = (response.body.jobs ?? []).map(normalizeJobResponse);
 
     for (const job of jobs) {
       this.processJob(job);
@@ -400,14 +408,21 @@ export class OJSWorker {
     // Find handler
     const handler = this.handlers.get(job.type);
     if (!handler) {
-      // No handler registered — nack the job
+      // No handler registered — nack the job. Explicitly caught (rather than
+      // left as a floating promise) since nack() can itself throw after
+      // exhausting its own retries, which would otherwise surface as an
+      // unhandled promise rejection in a long-running worker process.
       this.nack(job.id, {
         code: 'handler_not_found',
         message: `No handler registered for job type '${job.type}'.`,
         retryable: false,
-      }).finally(() => {
-        this.activeJobs.delete(job.id);
-      });
+      })
+        .catch((err: unknown) => {
+          console.warn(`[ojs-worker] failed to nack job ${job.id} (no handler registered):`, String(err));
+        })
+        .finally(() => {
+          this.finishJob(job.id, null);
+        });
       return;
     }
 
@@ -435,60 +450,243 @@ export class OJSWorker {
       handler,
     );
 
-    // Execute
+    // Execute. `handleExecutionSuccess()`/`handleExecutionFailure()` below
+    // never throw or reject — every failure they can encounter internally
+    // (ack/nack delivery, event dispatch) is caught and logged inside them
+    // — which is exactly why the *two-argument* form of `.then()` is used
+    // here instead of a chained `.then().catch()`. With `.then().catch()`,
+    // a failure raised *inside* the success callback (e.g. ack()
+    // exhausting its own retries) would itself be caught by the following
+    // `.catch()` and misreported as a *handler* failure, incorrectly
+    // nacking a job whose handler actually succeeded. The two-argument
+    // form only ever routes `execute(ctx)`'s own outcome to the matching
+    // branch: handler/middleware success calls `handleExecutionSuccess`,
+    // handler/middleware failure (including a timeout abort) calls
+    // `handleExecutionFailure` — nothing else can trigger either one, so
+    // ack failure can never be misread as a reason to nack, and exactly
+    // one terminal outcome (ack or nack) is attempted per execution.
     execute(ctx)
-      .then(async (result) => {
-        await this.ack(job.id, result as JsonValue | undefined);
-        this.jobsCompleted++;
-
-        await this.events.emit(
-          OJSEventEmitter.createEvent(
-            'job.completed',
-            `ojs://sdk/workers/${this.workerId}`,
-            {
-              job_type: job.type,
-              queue: job.queue,
-              duration_ms: Date.now() - processingStartedAt,
-              attempt: ctx.attempt,
-              result: result as JsonValue,
-            },
-            job.id,
-          ),
-        );
-      })
-      .catch(async (error: Error) => {
-        const isTimeout = error instanceof OJSTimeoutError ||
-          controller.signal.reason instanceof OJSTimeoutError;
-        const jobError: JobError = {
-          code: isTimeout ? 'timeout' : 'handler_error',
-          message: error.message,
-          retryable: true,
-          details: isTimeout
-            ? { job_id: job.id, timeout_ms: job.timeout }
-            : { stack: error.stack },
-        };
-
-        await this.nack(job.id, jobError);
-
-        await this.events.emit(
-          OJSEventEmitter.createEvent(
-            'job.failed',
-            `ojs://sdk/workers/${this.workerId}`,
-            {
-              job_type: job.type,
-              queue: job.queue,
-              attempt: ctx.attempt,
-              error: jobError,
-            },
-            job.id,
-          ),
-        );
-      })
+      .then(
+        (result) => this.handleExecutionSuccess(job, ctx, result, processingStartedAt),
+        (error: unknown) => this.handleExecutionFailure(job, ctx, error, controller),
+      )
       .finally(() => {
-        if (jobTimeoutId) clearTimeout(jobTimeoutId);
-        this.activeJobs.delete(job.id);
-        this.resolveShutdownIfIdle();
+        this.finishJob(job.id, jobTimeoutId);
       });
+  }
+
+  /**
+   * Handles a successful job execution: validates/normalizes the handler's
+   * result, acks the job exactly once, then emits `job.completed` for
+   * observability -- strictly in that order, and only as far as each step
+   * actually succeeds.
+   *
+   * The result is first normalized through {@link normalizeHandlerResult}'s
+   * exact JSON semantics (the same rules this SDK already applies to
+   * enqueue `args`/`meta`). A result that is not representable on the wire
+   * -- a `BigInt`, a non-finite number, a circular reference, or anything
+   * else `JSON.stringify()` itself would reject -- is a deterministic
+   * defect in the handler/result, not a transient failure: it is routed to
+   * {@link handleInvalidResult} instead, which nacks exactly once with the
+   * non-retryable `invalid_result` code. No ack, no `job.completed` event,
+   * and no completion metric are ever produced for that job in this case.
+   *
+   * Once normalized, an ack delivery failure (the request itself failing,
+   * or exhausting `requestWithRetry()`'s own retries) is logged as exactly
+   * that, an ack delivery failure, and is NEVER converted into a nack: the
+   * handler already completed successfully, so nacking here would
+   * misreport a successfully-processed job as failed to the server.
+   * Crucially, the `job.completed` event and the `jobsCompleted` counter
+   * are only ever produced *after* the ack itself has actually succeeded --
+   * an ack that failed to deliver must not be reported as a completion the
+   * server never actually recorded. A failing `job.completed` listener
+   * cannot affect this outcome either — event dispatch happens only after
+   * the ack decision is already final, and `OJSEventEmitter.emit()` itself
+   * never rejects (see events.ts), but the dispatch is wrapped defensively
+   * anyway so that invariant holds even if that ever changes.
+   */
+  private async handleExecutionSuccess(
+    job: Job,
+    ctx: JobContext,
+    result: unknown,
+    processingStartedAt: number,
+  ): Promise<void> {
+    let normalizedResult: JsonValue | undefined;
+    try {
+      normalizedResult = normalizeHandlerResult(result);
+    } catch (validationError) {
+      await this.handleInvalidResult(job, ctx, validationError);
+      return;
+    }
+
+    try {
+      await this.ack(job.id, normalizedResult);
+    } catch (ackError) {
+      console.warn(
+        `[ojs-worker] failed to ack job ${job.id} after successful execution ` +
+          '(the server may still consider it outstanding even though it completed):',
+        String(ackError),
+      );
+      // No completion event/metric without a successful ack: the server
+      // was never actually told this job completed, so reporting it as
+      // completed here would be observably false.
+      return;
+    }
+
+    this.jobsCompleted++;
+
+    // `JobCompletedData.result` is optional under `exactOptionalPropertyTypes`:
+    // the key must be entirely absent for "no result", never explicitly
+    // `result: undefined` -- mirrors `ack()`'s own `if (result !== undefined)
+    // body.result = result;` handling of the identical normalized value.
+    const completedData: JobCompletedData = {
+      job_type: job.type,
+      queue: job.queue,
+      duration_ms: Date.now() - processingStartedAt,
+      attempt: ctx.attempt,
+    };
+    if (normalizedResult !== undefined) completedData.result = normalizedResult;
+
+    await this.safeEmit(
+      OJSEventEmitter.createEvent(
+        'job.completed',
+        `ojs://sdk/workers/${this.workerId}`,
+        completedData,
+        job.id,
+      ),
+    );
+  }
+
+  /**
+   * Handles a handler that resolved successfully but returned a result
+   * that cannot be represented as OJS's canonical JSON wire format (see
+   * {@link normalizeHandlerResult}). This is a deterministic defect in the
+   * handler/result -- not a transient delivery failure -- so it nacks
+   * exactly once with the non-retryable `invalid_result` code and then
+   * emits `job.failed`, exactly like {@link handleExecutionFailure}. The
+   * job is never acked, no `job.completed` event is ever emitted for it,
+   * and the `jobsCompleted` counter is never incremented: from the
+   * server's perspective this attempt failed, not completed.
+   */
+  private async handleInvalidResult(
+    job: Job,
+    ctx: JobContext,
+    error: unknown,
+  ): Promise<void> {
+    const normalizedError = error instanceof Error ? error : new Error(String(error));
+    const jobError: JobError = {
+      code: 'invalid_result',
+      message:
+        `Handler for job type '${job.type}' resolved with a result that ` +
+        `cannot be represented as JSON: ${normalizedError.message}`,
+      retryable: false,
+      details: { stack: normalizedError.stack },
+    };
+
+    try {
+      await this.nack(job.id, jobError);
+    } catch (nackError) {
+      console.warn(
+        `[ojs-worker] failed to nack job ${job.id} after an invalid handler result:`,
+        String(nackError),
+      );
+    }
+
+    await this.safeEmit(
+      OJSEventEmitter.createEvent(
+        'job.failed',
+        `ojs://sdk/workers/${this.workerId}`,
+        {
+          job_type: job.type,
+          queue: job.queue,
+          attempt: ctx.attempt,
+          error: jobError,
+        },
+        job.id,
+      ),
+    );
+  }
+
+  /**
+   * Handles a failed job execution (handler/middleware threw, or the job
+   * timed out): nacks the job exactly once, then emits `job.failed` for
+   * observability. Never throws/rejects — a nack delivery failure
+   * (exhausting `requestWithRetry()`'s own retries) is logged and stops
+   * there rather than propagating as an unhandled rejection in a
+   * long-running worker process; it is never retried as an ack, since the
+   * handler did fail. As with the success path, a failing `job.failed`
+   * listener cannot alter this outcome.
+   */
+  private async handleExecutionFailure(
+    job: Job,
+    ctx: JobContext,
+    error: unknown,
+    controller: AbortController,
+  ): Promise<void> {
+    const normalizedError = error instanceof Error ? error : new Error(String(error));
+    const timeoutFailure = getTimeoutFailure(
+      controller.signal.reason,
+      normalizedError,
+    );
+    const jobError: JobError = timeoutFailure ?? {
+      code: 'handler_error',
+      message: normalizedError.message,
+      retryable: normalizedError instanceof OJSError
+        ? normalizedError.retryable
+        : true,
+      details: { stack: normalizedError.stack },
+    };
+
+    try {
+      await this.nack(job.id, jobError);
+    } catch (nackError) {
+      console.warn(`[ojs-worker] failed to nack job ${job.id} after handler failure:`, String(nackError));
+    }
+
+    await this.safeEmit(
+      OJSEventEmitter.createEvent(
+        'job.failed',
+        `ojs://sdk/workers/${this.workerId}`,
+        {
+          job_type: job.type,
+          queue: job.queue,
+          attempt: ctx.attempt,
+          error: jobError,
+        },
+        job.id,
+      ),
+    );
+  }
+
+  /**
+   * Emits a worker-side event without ever throwing/rejecting. Listener
+   * failures are already isolated inside `OJSEventEmitter.emit()` itself
+   * (see events.ts) so this never rejects in practice, but the ack/nack
+   * decision above must never be reachable from an event-dispatch failure
+   * of *any* kind — wrapping here keeps that true even if `emit()`'s own
+   * contract ever changes, and gives a clear, distinct log line if it does.
+   */
+  private async safeEmit<T extends Record<string, unknown>>(event: OJSEvent<T>): Promise<void> {
+    try {
+      await this.events.emit(event);
+    } catch (emitError) {
+      console.warn(`[ojs-worker] event emission failed for '${event.type}':`, String(emitError));
+    }
+  }
+
+  /**
+   * Exactly-once terminal cleanup for a single job execution: clears the
+   * job-level timeout (if any), releases its concurrency slot, and
+   * unblocks a pending graceful shutdown if this was the last active job.
+   * Runs regardless of the terminal outcome — ack, nack, or a nack/ack
+   * that itself failed to deliver — so shutdown always completes rather
+   * than waiting out the full grace-period timeout for a job that has, in
+   * fact, already finished.
+   */
+  private finishJob(jobId: string, jobTimeoutId: ReturnType<typeof setTimeout> | null): void {
+    if (jobTimeoutId) clearTimeout(jobTimeoutId);
+    this.activeJobs.delete(jobId);
+    this.resolveShutdownIfIdle();
   }
 
   // ---- Internal: ACK / NACK ----
@@ -517,7 +715,7 @@ export class OJSWorker {
   private async requestWithRetry(
     operation: string,
     jobId: string,
-    options: { method: string; path: string; body: unknown },
+    options: Pick<TransportRequestOptions, 'method' | 'path' | 'body'>,
   ): Promise<void> {
     let lastError: unknown;
     for (let attempt = 0; attempt < OJSWorker.ACK_NACK_MAX_RETRIES; attempt++) {
@@ -612,6 +810,57 @@ export class OJSWorker {
       this.shutdownPromise = null;
     }
   }
+}
+
+/**
+ * Returns the authoritative timeout/deadline contract for an execution.
+ * The worker-owned abort reason is checked first because downstream work may
+ * observe that timeout and reject later with a different, non-retryable error.
+ */
+function getTimeoutFailure(
+  signalReason: unknown,
+  executionError: Error,
+): JobError | undefined {
+  for (const candidate of [signalReason, executionError]) {
+    if (candidate instanceof OJSTimeoutError) {
+      return {
+        code: candidate.code,
+        message: candidate.message,
+        retryable: candidate.retryable,
+        ...(candidate.details !== undefined
+          ? { details: candidate.details }
+          : {}),
+      };
+    }
+
+    if (candidate instanceof TimeoutError) {
+      return {
+        code: 'timeout',
+        message: candidate.message,
+        retryable: true,
+        details: {
+          job_id: candidate.jobId,
+          timeout_ms: candidate.timeoutMs,
+        },
+      };
+    }
+
+    if (
+      candidate instanceof OJSError &&
+      (candidate.code === 'timeout' || candidate.code === 'deadline_exceeded')
+    ) {
+      return {
+        code: candidate.code,
+        message: candidate.message,
+        retryable: candidate.retryable,
+        ...(candidate.details !== undefined
+          ? { details: candidate.details }
+          : {}),
+      };
+    }
+  }
+
+  return undefined;
 }
 
 // ---- Platform helpers (avoid direct globalThis.process references) ----

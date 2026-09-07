@@ -22,7 +22,7 @@ export interface TransportResponse<T = unknown> {
 
 /** Options for transport requests. */
 export interface TransportRequestOptions {
-  method: 'GET' | 'POST' | 'DELETE';
+  method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE';
   path: string;
   body?: unknown | undefined;
   headers?: Record<string, string> | undefined;
@@ -37,6 +37,9 @@ export interface TransportRequestOptions {
  * The default implementation uses the built-in `fetch` API.
  */
 export interface Transport {
+  /** Whether the transport can read the pre-standard HTTP checkpoint endpoint. */
+  readonly supportsLegacyCheckpointResume?: boolean;
+
   /**
    * Send a request to the OJS server.
    * @returns The parsed response.
@@ -64,4 +67,3 @@ export interface TransportConfig {
   /** Configuration for automatic retry on 429 responses. */
   retryConfig?: Partial<RetryConfig> | undefined;
 }
-

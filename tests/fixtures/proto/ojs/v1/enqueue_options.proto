@@ -1,0 +1,222 @@
+// Test-only fixture proto: a minimal subset of ../../../../../ojs-proto/proto/ojs/v1/job.proto
+// (EnqueueOptions, RetryPolicy, UniquePolicy, JobState, UniqueConflictAction,
+// EnqueueRequest, BatchJobEntry, EnqueueBatchRequest), kept field-for-field
+// identical to the real .proto message definitions this SDK targets.
+//
+// Used by tests/transport-grpc-enqueue-options.test.ts to run the exact
+// requests GrpcTransport builds through *real* @grpc/proto-loader
+// `serialize()`/`deserialize()` — not just structural JSON comparison —
+// so a genuinely wire-incompatible field name/shape (e.g. an accidental
+// snake_case field, a Duration passed as a bare number, an unrecognized
+// enum string) would fail this test even if it happened to look right
+// as a plain JS object.
+//
+// This file is deliberately NOT the real ojs-proto package (which is a
+// sibling repository, not an npm dependency of this package) — see
+// GrpcTransportConfig.protoPath's own doc comment for how a real
+// deployment locates the actual proto files at runtime.
+syntax = "proto3";
+package ojs.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message RetryPolicy {
+  int32 max_attempts = 1;
+  google.protobuf.Duration initial_interval = 2;
+  double backoff_coefficient = 3;
+  google.protobuf.Duration max_interval = 4;
+  bool jitter = 5;
+  repeated string non_retryable_errors = 6;
+  string on_exhaustion = 7;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_SCHEDULED = 1;
+  JOB_STATE_AVAILABLE = 2;
+  JOB_STATE_PENDING = 3;
+  JOB_STATE_ACTIVE = 4;
+  JOB_STATE_COMPLETED = 5;
+  JOB_STATE_RETRYABLE = 6;
+  JOB_STATE_CANCELLED = 7;
+  JOB_STATE_DISCARDED = 8;
+}
+
+enum UniqueConflictAction {
+  UNIQUE_CONFLICT_ACTION_UNSPECIFIED = 0;
+  UNIQUE_CONFLICT_ACTION_REJECT = 1;
+  UNIQUE_CONFLICT_ACTION_REPLACE = 2;
+  UNIQUE_CONFLICT_ACTION_IGNORE = 3;
+  UNIQUE_CONFLICT_ACTION_REPLACE_EXCEPT_SCHEDULE = 4;
+}
+
+message UniquePolicy {
+  repeated string key = 1;
+  google.protobuf.Duration period = 2;
+  UniqueConflictAction on_conflict = 3;
+  repeated JobState states = 4;
+  repeated string args_keys = 5;
+  repeated string meta_keys = 6;
+}
+
+message EnqueueOptions {
+  string queue = 1;
+  int32 priority = 2;
+  google.protobuf.Timestamp delay_until = 3;
+  google.protobuf.Duration timeout = 4;
+  RetryPolicy retry = 5;
+  UniquePolicy unique = 6;
+  google.protobuf.Duration ttl = 7;
+  repeated string tags = 8;
+  string trace_id = 9;
+  google.protobuf.Struct meta = 10;
+  int32 max_attempts = 11;
+  google.protobuf.Duration visibility_timeout = 12;
+}
+
+message EnqueueRequest {
+  string type = 1;
+  repeated google.protobuf.Value args = 2;
+  EnqueueOptions options = 3;
+}
+
+message BatchJobEntry {
+  string type = 1;
+  repeated google.protobuf.Value args = 2;
+  EnqueueOptions options = 3;
+}
+
+message EnqueueBatchRequest {
+  repeated BatchJobEntry jobs = 1;
+  EnqueueOptions default_options = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Additional field-for-field fixture subsets of ojs-proto's worker.proto,
+// workflow.proto, and service.proto messages, used by the ACK-result,
+// workflow-mapping, and cron tests to run GrpcTransport's built requests
+// through real @grpc/proto-loader serialize()/deserialize() (see the header
+// comment above). Each message mirrors the real .proto definition exactly.
+
+// worker.proto: AckRequest (job_id + optional Struct result).
+message AckRequest {
+  string job_id = 1;
+  google.protobuf.Struct result = 2;
+}
+
+message JobError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  int32 attempt = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  string backtrace = 6;
+  google.protobuf.Struct details = 7;
+}
+
+message NackRequest {
+  string job_id = 1;
+  JobError error = 2;
+}
+
+message NackResponse {
+  JobState state = 1;
+  google.protobuf.Timestamp next_attempt_at = 2;
+}
+
+// service.proto durable checkpoint request/response subset.
+message SaveCheckpointRequest {
+  string job_id = 1;
+  google.protobuf.Struct state = 2;
+}
+
+message SaveCheckpointResponse {
+  int64 sequence = 1;
+}
+
+// workflow.proto: WorkflowStep (flat DAG node with per-step EnqueueOptions).
+message WorkflowStep {
+  string id = 1;
+  string type = 2;
+  repeated google.protobuf.Value args = 3;
+  repeated string depends_on = 4;
+  EnqueueOptions options = 5;
+}
+
+// workflow.proto: CreateWorkflowRequest (name + ordered steps).
+message CreateWorkflowRequest {
+  string name = 1;
+  repeated WorkflowStep steps = 2;
+}
+
+enum WorkflowState {
+  WORKFLOW_STATE_UNSPECIFIED = 0;
+  WORKFLOW_STATE_RUNNING = 1;
+  WORKFLOW_STATE_COMPLETED = 2;
+  WORKFLOW_STATE_FAILED = 3;
+  WORKFLOW_STATE_CANCELLED = 4;
+}
+
+enum WorkflowStepState {
+  WORKFLOW_STEP_STATE_UNSPECIFIED = 0;
+  WORKFLOW_STEP_STATE_WAITING = 1;
+  WORKFLOW_STEP_STATE_PENDING = 2;
+  WORKFLOW_STEP_STATE_ACTIVE = 3;
+  WORKFLOW_STEP_STATE_COMPLETED = 4;
+  WORKFLOW_STEP_STATE_FAILED = 5;
+  WORKFLOW_STEP_STATE_CANCELLED = 6;
+}
+
+message WorkflowStepStatus {
+  string id = 1;
+  string type = 2;
+  WorkflowStepState state = 3;
+  string job_id = 4;
+  repeated string depends_on = 5;
+}
+
+message Workflow {
+  string id = 1;
+  string name = 2;
+  WorkflowState state = 3;
+  repeated WorkflowStepStatus steps = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp completed_at = 6;
+}
+
+message CreateWorkflowResponse {
+  Workflow workflow = 1;
+}
+
+message GetWorkflowResponse {
+  Workflow workflow = 1;
+}
+
+// service.proto: RegisterCronRequest (schedule + per-trigger EnqueueOptions).
+message RegisterCronRequest {
+  string name = 1;
+  string cron = 2;
+  string timezone = 3;
+  string type = 4;
+  repeated google.protobuf.Value args = 5;
+  EnqueueOptions options = 6;
+}
+
+// service.proto: CronEntry (a registered schedule as returned by ListCron).
+message CronEntry {
+  string name = 1;
+  string cron = 2;
+  string timezone = 3;
+  string type = 4;
+  repeated google.protobuf.Value args = 5;
+  EnqueueOptions options = 6;
+  google.protobuf.Timestamp next_run_at = 7;
+  google.protobuf.Timestamp last_run_at = 8;
+}
+
+// service.proto: ListCronResponse (repeated CronEntry).
+message ListCronResponse {
+  repeated CronEntry entries = 1;
+}

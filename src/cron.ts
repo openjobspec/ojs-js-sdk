@@ -4,6 +4,7 @@
 
 import type { Transport } from './transport/types.js';
 import type { JsonValue } from './job.js';
+import { OJSValidationError } from './errors.js';
 
 /** Cron job options. */
 export interface CronJobOptions {
@@ -25,11 +26,22 @@ export interface CronJobInfo {
   timezone?: string;
   type: string;
   args: JsonValue[];
+  meta?: Record<string, JsonValue>;
   options?: CronJobOptions;
-  status: string;
+  /**
+   * Current schedule status. HTTP responses provide this field; the current
+   * gRPC proto omits it, but the SDK reports `active` where registration/list
+   * semantics make that state certain.
+   */
+  status?: string;
   last_run_at?: string;
   next_run_at?: string;
-  created_at: string;
+  /**
+   * Server-authoritative creation time when provided by the transport.
+   * Current gRPC CronEntry/RegisterCronResponse messages omit this field;
+   * registration returns the locally captured request time, while list omits it.
+   */
+  created_at?: string;
 }
 
 /** Pagination information. */
@@ -81,6 +93,8 @@ export class CronOperations {
 
   /** Register a new cron job. */
   async register(definition: CronJobDefinition): Promise<CronJobInfo> {
+    assertNoDeferredExpiresAt(definition);
+
     const body: Record<string, unknown> = {
       name: definition.name,
       cron: definition.cron,
@@ -105,5 +119,25 @@ export class CronOperations {
       method: 'DELETE',
       path: `/cron/${encodeURIComponent(name)}`,
     });
+  }
+}
+
+function assertNoDeferredExpiresAt(definition: CronJobDefinition): void {
+  const rawDefinition = definition as unknown as Record<string, unknown>;
+  const rawOptions =
+    typeof rawDefinition.options === 'object' &&
+    rawDefinition.options !== null &&
+    !Array.isArray(rawDefinition.options)
+      ? (rawDefinition.options as Record<string, unknown>)
+      : undefined;
+  if (
+    rawDefinition.expires_at !== undefined ||
+    rawDefinition.expiresAt !== undefined ||
+    rawOptions?.expires_at !== undefined ||
+    rawOptions?.expiresAt !== undefined
+  ) {
+    throw new OJSValidationError(
+      'Cron registration does not support expires_at/expiresAt: a cron job is materialized later, so converting an absolute deadline to a relative TTL now would shift the requested expiration.',
+    );
   }
 }

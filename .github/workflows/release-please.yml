@@ -12,7 +12,16 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - name: Require release automation token
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          test -n "$RELEASE_PLEASE_TOKEN" || {
+            echo "::error::Configure RELEASE_PLEASE_TOKEN as a GitHub App token or fine-grained PAT so release tags and releases trigger downstream publish workflows."
+            exit 1
+          }
       - uses: googleapis/release-please-action@c3fc4de07084f75a2b61a5b933069bda6edf3d5c # v4
         with:
-          release-type: node
-
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

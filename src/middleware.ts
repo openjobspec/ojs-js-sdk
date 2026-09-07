@@ -123,60 +123,140 @@ export class MiddlewareChain<T> {
 }
 
 /**
+ * The re-entrancy guard state for one *specific* `next()` closure instance,
+ * shared by both {@link composeExecution} and {@link composeEnqueue}.
+ *
+ * Each time a chain position is entered — whether that is the very first
+ * dispatch or a fresh retry-driven re-invocation — it is given a **new**
+ * `next` closure with its own private state, not a shared slot keyed by
+ * array index. This matters for middleware like the built-in
+ * `retry`/`timeout` pair: a retried attempt re-enters upstream positions
+ * with an entirely new downstream call chain, which must get fresh guard
+ * state rather than colliding with a *previous* attempt's now-stale state
+ * for the same nominal position.
+ *
+ * Within a single closure's lifetime:
+ * - `undefined` (never called): calling `next()` is allowed.
+ * - `'pending'`: `next()` has started and not yet settled. A second call
+ *   while pending is a *concurrent* re-entrancy bug (it would run the
+ *   remaining chain twice against shared context/state) and is always
+ *   rejected.
+ * - `'succeeded'`: `next()` already resolved successfully through this
+ *   closure. That downstream invocation already ran to completion, so
+ *   calling `next()` again through the *same* closure is rejected — there
+ *   is nothing left to legitimately retry via it.
+ * - `'failed'`: `next()` rejected through this closure. This is the only
+ *   state from which calling `next()` again is allowed, since it is what
+ *   lets a retry-style middleware (see `middleware/retry.ts`) catch a
+ *   failure and re-run the downstream chain — that re-run reuses the same
+ *   closure and legitimately expects to be allowed to call it again.
+ */
+type DispatchState = 'pending' | 'succeeded' | 'failed';
+
+/** Thrown when `next()` is called again after it already resolved. */
+const NEXT_AFTER_SUCCESS_MESSAGE =
+  'next() called again after it already resolved successfully; a chain ' +
+  'position may only be re-invoked after a rejection (e.g. for a retry), ' +
+  'not after it has already succeeded';
+
+/** Thrown when `next()` is called concurrently while still pending. */
+const NEXT_CONCURRENT_MESSAGE = 'next() called multiple times';
+
+/**
  * Compose execution middleware into a single handler function.
  * Implements the nested "onion model" where each middleware wraps the next.
+ *
+ * A given `next()` closure may only have one *in-flight* invocation at a
+ * time: calling it again while the previous call is still pending (e.g.
+ * firing it twice without awaiting) is rejected, since that would run the
+ * remaining chain concurrently against shared context/state. Calling the
+ * *same* closure again sequentially *after* it already resolved
+ * successfully is also rejected — that downstream invocation already ran to
+ * completion. The only sequential re-invocation this allows is *after a
+ * rejection*, which is what lets a retry-style middleware (see
+ * middleware/retry.ts) re-run the downstream chain on failure. Each retry
+ * attempt re-enters the chain with fresh `next()` closures for every
+ * downstream position, so a later attempt succeeding never collides with an
+ * earlier attempt's state.
  */
 export function composeExecution(
   middlewares: readonly { name: string; fn: ExecutionMiddleware }[],
   handler: (ctx: JobContext) => Promise<unknown>,
 ): (ctx: JobContext) => Promise<unknown> {
-  return (ctx: JobContext) => {
-    let index = -1;
-
-    function dispatch(i: number): Promise<unknown> {
-      if (i <= index) {
-        return Promise.reject(new Error('next() called multiple times'));
-      }
-      index = i;
-
-      const middleware = middlewares[i];
-      if (!middleware) {
-        return handler(ctx);
-      }
-
-      return middleware.fn(ctx, () => dispatch(i + 1));
+  function dispatch(ctx: JobContext, i: number): Promise<unknown> {
+    const middleware = middlewares[i];
+    if (!middleware) {
+      return Promise.resolve().then(() => handler(ctx));
     }
 
-    return dispatch(0);
-  };
+    let state: DispatchState | undefined;
+    const next: NextFunction = () => {
+      if (state === 'pending') {
+        return Promise.reject(new Error(NEXT_CONCURRENT_MESSAGE));
+      }
+      if (state === 'succeeded') {
+        return Promise.reject(new Error(NEXT_AFTER_SUCCESS_MESSAGE));
+      }
+      state = 'pending';
+      return dispatch(ctx, i + 1).then(
+        (result) => {
+          state = 'succeeded';
+          return result;
+        },
+        (error: unknown) => {
+          state = 'failed';
+          throw error;
+        },
+      );
+    };
+
+    return Promise.resolve().then(() => middleware.fn(ctx, next));
+  }
+
+  return (ctx: JobContext) => dispatch(ctx, 0);
 }
 
 /**
  * Compose enqueue middleware into a single function.
  * Linear chain: each middleware can pass, drop, or throw.
+ *
+ * Uses the same "no concurrent re-entrancy, retry-only-after-rejection,
+ * per-invocation-closure" guard as {@link composeExecution} — see its
+ * documentation for the rationale and the exact state transitions.
  */
 export function composeEnqueue(
   middlewares: readonly { name: string; fn: EnqueueMiddleware }[],
   finalEnqueue: (job: Job) => Promise<Job | null>,
 ): (job: Job) => Promise<Job | null> {
-  return (job: Job) => {
-    let index = -1;
-
-    function dispatch(i: number, currentJob: Job): Promise<Job | null> {
-      if (i <= index) {
-        return Promise.reject(new Error('next() called multiple times'));
-      }
-      index = i;
-
-      const middleware = middlewares[i];
-      if (!middleware) {
-        return finalEnqueue(currentJob);
-      }
-
-      return middleware.fn(currentJob, (nextJob) => dispatch(i + 1, nextJob));
+  function dispatch(i: number, currentJob: Job): Promise<Job | null> {
+    const middleware = middlewares[i];
+    if (!middleware) {
+      return Promise.resolve().then(() => finalEnqueue(currentJob));
     }
 
-    return dispatch(0, job);
-  };
-}
+    let state: DispatchState | undefined;
+    const next = (nextJob: Job): Promise<Job | null> => {
+      if (state === 'pending') {
+        return Promise.reject(new Error(NEXT_CONCURRENT_MESSAGE));
+      }
+      if (state === 'succeeded') {
+        return Promise.reject(new Error(NEXT_AFTER_SUCCESS_MESSAGE));
+      }
+      state = 'pending';
+      return dispatch(i + 1, nextJob).then(
+        (result) => {
+          state = 'succeeded';
+          return result;
+        },
+        (error: unknown) => {
+          state = 'failed';
+          throw error;
+        },
+      );
+    };
 
+    return Promise.resolve().then(() => middleware.fn(currentJob, next));
+  }
+
+  return (job: Job) => dispatch(0, job);
+}

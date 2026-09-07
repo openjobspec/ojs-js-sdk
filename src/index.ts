@@ -1,7 +1,7 @@
 /**
  * @openjobspec/sdk — Official Open Job Spec SDK for JavaScript and TypeScript.
  *
- * Zero dependencies. TypeScript-first. Full type safety.
+ * Minimal dependencies. TypeScript-first. Full type safety.
  *
  * @example
  * ```ts
@@ -31,6 +31,7 @@ export type {
   UniqueOptions,
   RetryPolicy,
   UniquePolicy,
+  UniqueKeyDimension,
 } from './job.js';
 export { TERMINAL_STATES, normalizeArgs } from './job.js';
 
@@ -44,6 +45,8 @@ export type {
   WorkflowDefinition,
   WorkflowStatus,
   WorkflowState,
+  WorkflowStepStatus,
+  WorkflowStepState,
 } from './workflow.js';
 
 // ---- Middleware ----
@@ -77,6 +80,13 @@ export type {
   OJSEventType,
   OJSEventListener,
   OJSEventDataMap,
+  JobEnqueuedData,
+  JobStartedData,
+  JobCompletedData,
+  JobFailedData,
+  JobRetryingData,
+  WorkerStartedData,
+  WorkerStoppedData,
 } from './events.js';
 
 // ---- Errors ----
@@ -84,12 +94,16 @@ export {
   OJSError,
   OJSValidationError,
   OJSNotFoundError,
+  OJSMethodNotAllowedError,
   OJSDuplicateError,
   OJSConflictError,
   OJSServerError,
   OJSConnectionError,
+  OJSRequestTimeoutError,
   OJSTimeoutError,
   OJSRateLimitError,
+  OJSCheckpointLoadError,
+  ReplayIntegrityError,
 } from './errors.js';
 export type { RateLimitInfo } from './errors.js';
 export type { ErrorCodeEntry } from './error-codes.js';
@@ -110,6 +124,7 @@ export type {
   CronJobOptions,
   CronJobDefinition,
   CronListOptions,
+  Pagination as CronPagination,
 } from './cron.js';
 
 // ---- Schema Operations ----
@@ -118,21 +133,33 @@ export type {
   SchemaInfo,
   SchemaDefinition,
   SchemaListOptions,
+  Pagination as SchemaPagination,
 } from './schema.js';
 
 // ---- Progress Reporting ----
 export { reportProgress } from './progress.js';
 export type { ProgressReport } from './progress.js';
+// eslint-disable-next-line @typescript-eslint/no-deprecated -- intentionally re-exported so migrating callers can still reference the deprecated shape by name; see progress.ts's own doc comment.
+export type { LegacyProgressReport } from './progress.js';
 
 // ---- Transport ----
 export { HttpTransport } from './transport/http.js';
 export { GrpcTransport } from './transport/grpc.js';
-export type { GrpcTransportConfig } from './transport/grpc.js';
+export type { GrpcTransportConfig, GrpcProtocolWarning } from './transport/grpc.js';
+// Additive: gRPC server-streaming (StreamJobs/StreamEvents) public types.
+export type {
+  GrpcStreamJobsRequest,
+  GrpcStreamEventsRequest,
+  GrpcStreamOptions,
+  GrpcStreamReconnectOptions,
+  GrpcStreamEvent,
+} from './transport/grpc.js';
 export type {
   Transport,
   TransportConfig,
   TransportRequestOptions,
   TransportResponse,
+  OJSResponseHeaders,
 } from './transport/types.js';
 
 // ---- Validation ----
@@ -145,6 +172,7 @@ export {
   validateDuration,
   validateEnqueueRequest,
 } from './validation/schemas.js';
+export type { ValidationError } from './validation/schemas.js';
 
 // ---- Encryption Middleware ----
 export {
@@ -161,7 +189,7 @@ export type { KeyProvider, EncryptResult } from './encryption.js';
 
 // OpenTelemetry
 export { openTelemetryMiddleware } from './otel.js';
-export type { OpenTelemetryConfig } from './otel.js';
+export type { MeterProvider, OpenTelemetryConfig } from './otel.js';
 
 // ---- Serverless Adapters ----
 export {
@@ -201,12 +229,24 @@ export {
 export type {
   GPUTypeValue,
   GPURequirements,
+  TPURequirements,
   CPURequirements,
   ResourceRequirements,
   ModelReference,
   CheckpointConfig,
   PreemptionConfig,
+  AffinityOperator,
+  AffinityRule,
+  WeightedAffinityRule,
+  AffinityConfig,
   MLEnqueueOptions,
+  MLResourcesMetadata,
+  MLGPUResourceMetadata,
+  MLTPUResourceMetadata,
+  MLCPUResourceMetadata,
+  MLModelResourceMetadata,
+  MLCheckpointResourceMetadata,
+  MLPreemptionResourceMetadata,
 } from './ml.js';
 
 // ---- Durable Execution ----
@@ -219,5 +259,10 @@ export { testing };
 export type { FakeJob, MatchOptions } from './testing.js';
 
 // ---- Real-time Subscriptions (SSE) ----
-export { subscribe, subscribeJob, subscribeQueue } from './subscribe.js';
+export {
+  SSEConnectionError,
+  subscribe,
+  subscribeJob,
+  subscribeQueue,
+} from './subscribe.js';
 export type { SSEEvent, SSEEventHandler, SSESubscription, SubscribeOptions } from './subscribe.js';

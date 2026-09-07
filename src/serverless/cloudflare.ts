@@ -10,6 +10,7 @@
  *
  * const handler = createWorkerHandler({
  *   url: 'https://ojs.example.com',
+ *   signingSecret: env.OJS_SIGNING_SECRET,
  * });
  *
  * handler.register('email.send', async (ctx) => {
@@ -26,17 +27,51 @@
  */
 
 import type { Job } from '../job.js';
+import type { PushAuthOptions } from './push-auth.js';
+import {
+  readBoundedRequestBody,
+  verifyPushAuth,
+} from './push-auth.js';
 
-export interface CloudflareWorkerOptions {
-  /** OJS server URL for ack/fail callbacks. */
-  url: string;
-  /** API key for OJS server authentication. */
+export interface CloudflareWorkerOptions extends PushAuthOptions {
+  /**
+   * OJS server URL.
+   *
+   * @deprecated No longer used by `handleRequest()`. The HTTP push protocol
+   * response (this handler's returned `Response`) is now the sole signal the
+   * OJS backend uses to derive the job's state transition; the handler no
+   * longer performs a follow-up ACK/NACK callback request. Retained only for
+   * backward compatibility with existing configuration objects.
+   */
+  url?: string;
+  /**
+   * API key for OJS server authentication.
+   *
+   * @deprecated Unused; see `url`.
+   */
   apiKey?: string;
+  /**
+   * Maximum total ACK/NACK callback delivery time. Defaults to 5000ms.
+   *
+   * @deprecated Unused; see `url`.
+   */
+  callbackTimeoutMs?: number;
+}
+
+/** Push delivery envelope: {job, worker_id?, delivery_id?}. */
+export interface PushEnvelope {
+  job: Job;
+  worker_id?: string;
+  delivery_id?: string;
 }
 
 export interface CloudflareJobContext {
   job: Job;
   request: Request;
+  /** Worker ID from the push envelope, if provided. */
+  workerId?: string | undefined;
+  /** Delivery ID from the push envelope, if provided. */
+  deliveryId?: string | undefined;
 }
 
 export type CloudflareJobHandler = (ctx: CloudflareJobContext) => Promise<void>;
@@ -64,80 +99,96 @@ export function createWorkerHandler(
         return new Response('Method not allowed', { status: 405 });
       }
 
-      let job: Job;
+      const bodyResult = await readBoundedRequestBody(request, options);
+      if (!bodyResult.ok) {
+        return new Response(
+          JSON.stringify({ error: bodyResult.error }),
+          {
+            status: bodyResult.status,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }
+      const { rawBody } = bodyResult;
+
+      // Push auth verification
+      const authResult = verifyPushAuth(
+        rawBody,
+        request.headers.get('x-ojs-timestamp'),
+        request.headers.get('x-ojs-signature'),
+        options,
+      );
+
+      if (!authResult.ok) {
+        return new Response(
+          JSON.stringify({ error: authResult.error }),
+          { status: authResult.status, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+
+      // Parse envelope
+      let envelope: PushEnvelope;
       try {
-        job = (await request.json()) as Job;
+        const parsed = JSON.parse(
+          new TextDecoder('utf-8', { fatal: true }).decode(rawBody),
+        ) as Record<string, unknown>;
+        if (parsed.job && typeof parsed.job === 'object') {
+          envelope = parsed as unknown as PushEnvelope;
+        } else if (options.allowInsecurePush && parsed.type && typeof parsed.type === 'string') {
+          // Legacy: direct Job body permitted only under insecure mode
+          envelope = { job: parsed as unknown as Job };
+        } else {
+          return new Response(
+            JSON.stringify({ error: 'Invalid push envelope: missing "job" field' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
       } catch {
         return new Response('Invalid JSON', { status: 400 });
       }
 
-      const handler = handlers.get(job.type);
-      if (!handler) {
-        return new Response(
-          JSON.stringify({ error: `No handler for job type: ${job.type}` }),
-          { status: 422, headers: { 'Content-Type': 'application/json' } },
-        );
-      }
+      const { job } = envelope;
 
+      // The HTTP push protocol response below is the sole state-transition
+      // signal for this delivery: a handler that resolves returns the
+      // "completed" response and a handler that throws returns an HTTP 200
+      // "failed" response, both derived purely from local handler outcome.
+      // Neither path performs a follow-up OJS `/workers/ack` or
+      // `/workers/nack` callback request; the backend that pushed this job
+      // derives the state transition from this response.
       try {
-        await handler({ job, request });
-
-        await ackJob(options, job.id);
-
-        return new Response(
-          JSON.stringify({ status: 'completed', job_id: job.id }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        );
+        const handler = handlers.get(job.type);
+        if (!handler) {
+          throw new Error(`No handler registered for job type: ${job.type}`);
+        }
+        await handler({
+          job,
+          request,
+          workerId: envelope.worker_id,
+          deliveryId: envelope.delivery_id,
+        });
       } catch (err: unknown) {
         const errorMessage =
           err instanceof Error ? err.message : 'Unknown error';
-        await failJob(options, job.id, errorMessage);
 
         return new Response(
           JSON.stringify({
             status: 'failed',
             job_id: job.id,
-            error: errorMessage,
+            error: {
+              code: 'handler_error',
+              message: errorMessage,
+              retryable: true,
+            },
           }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } },
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
         );
       }
+
+      return new Response(
+        JSON.stringify({ status: 'completed', job_id: job.id }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
     },
   };
-}
-
-async function ackJob(
-  options: CloudflareWorkerOptions,
-  jobId: string,
-): Promise<void> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (options.apiKey) {
-    headers['Authorization'] = `Bearer ${options.apiKey}`;
-  }
-
-  await fetch(`${options.url}/ojs/v1/jobs/${jobId}/ack`, {
-    method: 'POST',
-    headers,
-  });
-}
-
-async function failJob(
-  options: CloudflareWorkerOptions,
-  jobId: string,
-  error: string,
-): Promise<void> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (options.apiKey) {
-    headers['Authorization'] = `Bearer ${options.apiKey}`;
-  }
-
-  await fetch(`${options.url}/ojs/v1/jobs/${jobId}/nack`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ error }),
-  });
 }

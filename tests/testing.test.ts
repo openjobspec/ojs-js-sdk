@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { OJSClient } from '../src/client.js';
 import * as testing from '../src/testing.js';
+import { createEnqueueEnvelope } from '../src/job.js';
 import type { Transport, TransportRequestOptions, TransportResponse } from '../src/transport/types.js';
 
 function createMockTransport(): Transport {
@@ -63,6 +64,7 @@ describe('Testing Module', () => {
     it('should record enqueued jobs without hitting transport', async () => {
       const job = await client.enqueue('email.send', { to: 'user@example.com' });
 
+      if (job === null) throw new Error('Expected enqueue result');
       expect(job.type).toBe('email.send');
       expect(job.queue).toBe('default');
       expect(job.args).toEqual([{ to: 'user@example.com' }]);
@@ -76,6 +78,15 @@ describe('Testing Module', () => {
       testing.assertEnqueued('report.generate', { queue: 'reports' });
     });
 
+    it.each(['queue--name', 'queue.', 'queue-'])(
+      'should record schema-valid queue name %s',
+      async (queue) => {
+        await client.enqueue('report.generate', { id: 42 }, { queue });
+
+        testing.assertEnqueued('report.generate', { queue });
+      },
+    );
+
     it('should record batch enqueues', async () => {
       const jobs = await client.enqueueBatch([
         { type: 'email.send', args: { to: 'a@example.com' } },
@@ -86,10 +97,72 @@ describe('Testing Module', () => {
       testing.assertEnqueued('email.send', { count: 2 });
     });
 
+    it('should record schema-valid separator forms in fake batches', async () => {
+      const jobs = await client.enqueueBatch([
+        { type: 'first.job', options: { queue: 'queue--name' } },
+        { type: 'second.job', options: { queue: 'queue.' } },
+        { type: 'third.job', options: { queue: 'queue-' } },
+      ]);
+
+      expect(jobs.map((job) => job.queue)).toEqual([
+        'queue--name',
+        'queue.',
+        'queue-',
+      ]);
+    });
+
     it('should not call transport in test mode', async () => {
       // Transport throws if called — this proves interception works
       await client.enqueue('test.job', { key: 'value' });
       testing.assertEnqueued('test.job');
+    });
+
+    it('should apply middleware mutations before recording fake jobs', async () => {
+      client.useEnqueue('mutate', async (job, next) => {
+        job.type = 'mutated.job';
+        job.queue = 'mutated';
+        job.args = ['ciphertext'];
+        job.priority = 0;
+        job.timeout = 0;
+        job.meta = { encrypted: true };
+        return next(job);
+      });
+
+      const job = await client.enqueue('original.job', { plaintext: true });
+
+      expect(job).toMatchObject({
+        type: 'mutated.job',
+        queue: 'mutated',
+        args: ['ciphertext'],
+        priority: 0,
+        timeout: 0,
+        meta: { encrypted: true },
+      });
+      testing.assertEnqueued('mutated.job', {
+        args: ['ciphertext'],
+        queue: 'mutated',
+        meta: { encrypted: true },
+      });
+    });
+
+    it('should omit middleware-dropped fake jobs', async () => {
+      client.useEnqueue('drop', async () => null);
+
+      await expect(client.enqueue('dropped.job', {})).resolves.toBeNull();
+      expect(testing.allEnqueued()).toEqual([]);
+    });
+
+    it('should leave fake batches untouched when preparation throws', async () => {
+      client.useEnqueue('throw', async (job, next) => {
+        if (job.type === 'second.job') throw new Error('stop batch');
+        return next(job);
+      });
+
+      await expect(client.enqueueBatch([
+        { type: 'first.job' },
+        { type: 'second.job' },
+      ])).rejects.toThrow('stop batch');
+      expect(testing.allEnqueued()).toEqual([]);
     });
   });
 
@@ -226,11 +299,73 @@ describe('Testing Module', () => {
       testing.assertFailed('failing.job');
     });
 
+    it('should capture the handler error message on the discarded FakeJob instead of swallowing it', async () => {
+      testing.registerHandler('failing.job', () => {
+        throw new Error('Handler failed: connection refused');
+      });
+
+      await testing._recordEnqueue('failing.job', []);
+
+      const [performed] = testing.allEnqueued({ type: 'failing.job' });
+      expect(performed!.state).toBe('discarded');
+      expect(performed!.error).toBe('Handler failed: connection refused');
+    });
+
+    it('should capture a non-Error thrown value as a string', async () => {
+      testing.registerHandler('throws-string.job', () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw 'plain string failure';
+      });
+
+      await testing._recordEnqueue('throws-string.job', []);
+
+      const [performed] = testing.allEnqueued({ type: 'throws-string.job' });
+      expect(performed!.error).toBe('plain string failure');
+    });
+
+    it('should leave error undefined for a successfully completed job', async () => {
+      testing.registerHandler('ok.job', () => {});
+
+      await testing._recordEnqueue('ok.job', []);
+
+      const [performed] = testing.allEnqueued({ type: 'ok.job' });
+      expect(performed!.state).toBe('completed');
+      expect(performed!.error).toBeUndefined();
+    });
+
     it('should not perform jobs without a handler', async () => {
       await testing._recordEnqueue('unregistered.job', []);
 
       testing.assertEnqueued('unregistered.job');
       expect(() => testing.assertPerformed('unregistered.job')).toThrow();
+    });
+
+    it('should run client middleware before selecting and invoking an inline handler', async () => {
+      const client = new OJSClient({
+        url: 'http://localhost:8080',
+        transport: createMockTransport(),
+      });
+      const observed: unknown[] = [];
+      testing.registerHandler('mutated.job', (job) => {
+        observed.push(job.type, job.queue, job.args, job.meta);
+      });
+      client.useEnqueue('mutate', async (job, next) => {
+        job.type = 'mutated.job';
+        job.queue = 'inline';
+        job.args = ['encoded'];
+        job.meta = { codec: 'test' };
+        return next(job);
+      });
+
+      await client.enqueue('original.job', { plaintext: true });
+
+      expect(observed).toEqual([
+        'mutated.job',
+        'inline',
+        ['encoded'],
+        { codec: 'test' },
+      ]);
+      testing.assertCompleted('mutated.job');
     });
   });
 
@@ -274,6 +409,16 @@ describe('Testing Module', () => {
       await testing.drain();
 
       testing.assertFailed('fail.job');
+    });
+
+    it('should capture the handler error message when draining, instead of swallowing it', async () => {
+      testing.registerHandler('fail.job', () => { throw new Error('drain failure detail'); });
+
+      await testing._recordEnqueue('fail.job', []);
+      await testing.drain();
+
+      const [performed] = testing.allEnqueued({ type: 'fail.job' });
+      expect(performed!.error).toBe('drain failure detail');
     });
 
     it('should complete jobs without handlers', async () => {
@@ -357,6 +502,168 @@ describe('Testing Module', () => {
       expect(() => testing.assertEnqueued('email.send')).toThrow(
         'No jobs were enqueued at all.',
       );
+    });
+  });
+
+  describe('Finding 7: deep cloning of args/meta/options in fake mode', () => {
+    beforeEach(() => {
+      testing.fake();
+    });
+
+    it('client.enqueue() returned job mutations (post-next) cannot alter the recorded store', async () => {
+      const client = new OJSClient({ url: 'http://localhost:8080', transport: createMockTransport() });
+
+      const job = await client.enqueue('email.send', [{ to: 'user@example.com', nested: { count: 1 } }], {
+        meta: { owner: 'team-a', nested: { level: 1 } },
+      });
+      expect(job).not.toBeNull();
+
+      // Mutate the *returned* job's nested args/meta after next() -- this
+      // must never reach the internally recorded FakeJob.
+      const returnedArgs = job!.args as unknown as [{ to: string; nested: { count: number } }];
+      returnedArgs[0].nested.count = 999;
+      returnedArgs[0].to = 'tampered@example.com';
+      const returnedMeta = job!.meta as unknown as { owner: string; nested: { level: number } };
+      returnedMeta.owner = 'tampered';
+      returnedMeta.nested.level = 999;
+      (job!.args as unknown[]).push('extra');
+
+      const [recorded] = testing.allEnqueued({ type: 'email.send' });
+      expect(recorded!.args).toEqual([{ to: 'user@example.com', nested: { count: 1 } }]);
+      expect(recorded!.meta).toEqual({ owner: 'team-a', nested: { level: 1 } });
+
+      testing.assertEnqueued('email.send', {
+        args: [{ to: 'user@example.com', nested: { count: 1 } }],
+      });
+    });
+
+    it('mutating a job returned by allEnqueued() cannot alter the recorded store', async () => {
+      await testing._recordEnqueue('report.generate', [{ scope: { region: 'us' } }], {
+        meta: { owner: { team: 'analytics' } },
+      });
+
+      const [job] = testing.allEnqueued({ type: 'report.generate' });
+      const args = job!.args as unknown as [{ scope: { region: string } }];
+      args[0].scope.region = 'eu';
+      const meta = job!.meta as unknown as { owner: { team: string } };
+      meta.owner.team = 'tampered';
+      job!.options.queue = 'tampered-queue';
+      (job!.tags ??= []).push('tampered');
+
+      const [again] = testing.allEnqueued({ type: 'report.generate' });
+      expect(again!.args).toEqual([{ scope: { region: 'us' } }]);
+      expect(again!.meta).toEqual({ owner: { team: 'analytics' } });
+      expect(again!.options.queue).not.toBe('tampered-queue');
+    });
+
+    it('mutating a job returned by performed() cannot alter the recorded store', async () => {
+      testing.registerHandler('worker.job', async () => undefined);
+      await testing._recordEnqueue('worker.job', [{ payload: { value: 1 } }]);
+      await testing.drain();
+
+      const [job] = testing.performed({ type: 'worker.job' });
+      expect(job!.state).toBe('completed');
+      const args = job!.args as unknown as [{ payload: { value: number } }];
+      args[0].payload.value = 999;
+
+      const [again] = testing.performed({ type: 'worker.job' });
+      expect(again!.args).toEqual([{ payload: { value: 1 } }]);
+    });
+
+    it('mutating the caller-supplied args/meta objects after enqueuing does not affect the recorded store', async () => {
+      const args: [{ nested: { value: number } }] = [{ nested: { value: 1 } }];
+      const meta: { tag: { value: string } } = { tag: { value: 'original' } };
+
+      await testing._recordEnqueue('email.send', args, { meta });
+
+      args[0].nested.value = 999;
+      meta.tag.value = 'tampered';
+
+      const [recorded] = testing.allEnqueued({ type: 'email.send' });
+      expect(recorded!.args).toEqual([{ nested: { value: 1 } }]);
+      expect(recorded!.meta).toEqual({ tag: { value: 'original' } });
+    });
+
+    it('two _toJob() calls for the same recorded job never share args/meta references', async () => {
+      const fakeJob = await testing._recordEnqueue('email.send', [{ nested: { count: 1 } }], {
+        meta: { owner: { team: 'a' } },
+      });
+
+      const jobA = testing._toJob(fakeJob);
+      const jobB = testing._toJob(fakeJob);
+
+      expect(jobA.args).not.toBe(jobB.args);
+      expect(jobA.args[0]).not.toBe(jobB.args[0]);
+      expect(jobA.meta).not.toBe(jobB.meta);
+
+      (jobA.args[0] as { nested: { count: number } }).nested.count = 999;
+      expect((jobB.args[0] as { nested: { count: number } }).nested.count).toBe(1);
+      expect((fakeJob.args[0] as { nested: { count: number } }).nested.count).toBe(1);
+    });
+
+    it('real-mode parity: fake-mode recording normalizes a Date arg/meta value identically to createEnqueueEnvelope', async () => {
+      const date = new Date('2024-06-15T12:00:00.000Z');
+
+      // Real-mode reference: what createEnqueueEnvelope() (used by the
+      // real transport path) produces for the same input.
+      const realEnvelope = createEnqueueEnvelope(
+        'email.send',
+        [{ when: date } as unknown as Record<string, never>],
+        { meta: { when: date } as unknown as Record<string, never> },
+      );
+
+      const fakeJob = await testing._recordEnqueue(
+        'email.send',
+        [{ when: date } as unknown as Record<string, never>],
+        { meta: { when: date } as unknown as Record<string, never> },
+      );
+
+      expect(fakeJob.args).toEqual(realEnvelope.args);
+      expect(fakeJob.meta).toEqual(realEnvelope.meta);
+      expect(fakeJob.args).toEqual([{ when: '2024-06-15T12:00:00.000Z' }]);
+      expect(fakeJob.meta).toEqual({ when: '2024-06-15T12:00:00.000Z' });
+      // The original Date instance is untouched.
+      expect(date instanceof Date).toBe(true);
+    });
+
+    it('real-mode parity: __proto__/constructor/prototype keys are preserved as ordinary data, matching createEnqueueEnvelope', async () => {
+      const hostile = JSON.parse(
+        '{"__proto__": {"polluted": true}, "constructor": 1, "prototype": 2}',
+      ) as Record<string, never>;
+
+      const realEnvelope = createEnqueueEnvelope('email.send', [hostile]);
+      const fakeJob = await testing._recordEnqueue('email.send', [hostile]);
+
+      expect(fakeJob.args).toEqual(realEnvelope.args);
+      const cloned = fakeJob.args[0] as Record<string, unknown>;
+      expect(Object.getOwnPropertyNames(cloned).sort()).toEqual(
+        ['__proto__', 'constructor', 'prototype'].sort(),
+      );
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+      expect(Object.getPrototypeOf(cloned)).toBeNull();
+
+      // The returned public Job (via _toJob) preserves the same shape.
+      const job = testing._toJob(fakeJob);
+      const jobArg = job.args[0] as Record<string, unknown>;
+      expect(Object.getOwnPropertyNames(jobArg).sort()).toEqual(
+        ['__proto__', 'constructor', 'prototype'].sort(),
+      );
+      expect(Object.getPrototypeOf(jobArg)).toBeNull();
+    });
+
+    it('real-mode parity: __proto__ key in meta is preserved as ordinary data without prototype pollution', async () => {
+      const hostileMeta = JSON.parse('{"__proto__": {"polluted": true}}') as Record<
+        string,
+        never
+      >;
+
+      const realEnvelope = createEnqueueEnvelope('email.send', [], { meta: hostileMeta });
+      const fakeJob = await testing._recordEnqueue('email.send', [], { meta: hostileMeta });
+
+      expect(fakeJob.meta).toEqual(realEnvelope.meta);
+      expect(Object.getOwnPropertyNames(fakeJob.meta)).toEqual(['__proto__']);
+      expect(Object.getPrototypeOf(fakeJob.meta)).toBeNull();
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     });
   });
 });

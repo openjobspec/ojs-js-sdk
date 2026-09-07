@@ -100,17 +100,15 @@ export function isNonRetryable(
  * Supports: PTnHnMnS, PTn.nS, PnD, and common subsets.
  */
 export function parseDurationToMs(duration: string): number {
-  const match = duration.match(
-    /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/,
-  );
+  const match = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(duration);
   if (!match) {
     throw new Error(`Invalid ISO 8601 duration: ${duration}`);
   }
 
-  const days = parseInt(match[1] || '0', 10);
-  const hours = parseInt(match[2] || '0', 10);
-  const minutes = parseInt(match[3] || '0', 10);
-  const seconds = parseFloat(match[4] || '0');
+  const days = parseInt(match[1] ?? '0', 10);
+  const hours = parseInt(match[2] ?? '0', 10);
+  const minutes = parseInt(match[3] ?? '0', 10);
+  const seconds = parseFloat(match[4] ?? '0');
 
   return (
     days * 86400000 +

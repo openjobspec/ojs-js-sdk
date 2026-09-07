@@ -16,7 +16,7 @@
  *   decryptionMiddleware,
  * } from '@openjobspec/sdk/encryption';
  *
- * const keys = new Map([['key-1', crypto.getRandomValues(new Uint8Array(32))]]);
+ * const keys = new Map([['key-1', my32ByteSecret]]);
  * const provider = new StaticKeyProvider(keys, 'key-1');
  * const codec = new EncryptionCodec(provider);
  *
@@ -32,6 +32,7 @@
 
 import type { Job, JsonValue } from './job.js';
 import type { EnqueueMiddleware, ExecutionMiddleware, JobContext, NextFunction } from './middleware.js';
+import { getRandomBytes, getWebCrypto } from './crypto.js';
 
 // ---- Meta Keys (OJS codec spec) ----
 
@@ -144,8 +145,9 @@ export class EncryptionCodec {
   async encrypt(data: Uint8Array): Promise<EncryptResult> {
     const keyId = this.keyProvider.getCurrentKeyId();
     const rawKey = await this.keyProvider.getKey(keyId);
+    const webCrypto = await getWebCrypto();
 
-    const cryptoKey = await globalThis.crypto.subtle.importKey(
+    const cryptoKey = await webCrypto.subtle.importKey(
       'raw',
       rawKey,
       { name: 'AES-GCM' },
@@ -153,9 +155,9 @@ export class EncryptionCodec {
       ['encrypt'],
     );
 
-    const nonce = globalThis.crypto.getRandomValues(new Uint8Array(12));
+    const nonce = getRandomBytes(12);
 
-    const ciphertextBuffer = await globalThis.crypto.subtle.encrypt(
+    const ciphertextBuffer = await webCrypto.subtle.encrypt(
       { name: 'AES-GCM', iv: nonce },
       cryptoKey,
       data,
@@ -171,8 +173,9 @@ export class EncryptionCodec {
   /** Decrypt ciphertext using the key identified by keyId. */
   async decrypt(ciphertext: Uint8Array, nonce: Uint8Array, keyId: string): Promise<Uint8Array> {
     const rawKey = await this.keyProvider.getKey(keyId);
+    const webCrypto = await getWebCrypto();
 
-    const cryptoKey = await globalThis.crypto.subtle.importKey(
+    const cryptoKey = await webCrypto.subtle.importKey(
       'raw',
       rawKey,
       { name: 'AES-GCM' },
@@ -180,7 +183,7 @@ export class EncryptionCodec {
       ['decrypt'],
     );
 
-    const plaintextBuffer = await globalThis.crypto.subtle.decrypt(
+    const plaintextBuffer = await webCrypto.subtle.decrypt(
       { name: 'AES-GCM', iv: nonce },
       cryptoKey,
       ciphertext,

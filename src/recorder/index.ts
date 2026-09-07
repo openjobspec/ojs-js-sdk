@@ -3,9 +3,9 @@
  * Traces can be exported to the OJS Replay Studio.
  */
 
-import type { SourceMap, TraceEntry } from "./types";
+import type { SourceMap, TraceEntry } from './types.js';
 
-export type { SourceMap, TraceEntry } from "./types";
+export type { SourceMap, TraceEntry } from './types.js';
 
 /**
  * Recorder captures execution traces for a single job handler invocation.
@@ -15,8 +15,8 @@ export type { SourceMap, TraceEntry } from "./types";
  * const recorder = new Recorder();
  * const start = Date.now();
  * const result = await handler(args);
- * recorder.recordCall("handler", args, result, Date.now() - start);
- * recorder.attachSourceMap("abc123", "src/handler.ts", 42);
+ * recorder.recordCall('handler', args, result, Date.now() - start);
+ * recorder.attachSourceMap('abc123', 'src/handler.ts', 42);
  * console.log(recorder.trace());
  * ```
  */
@@ -49,10 +49,10 @@ export class Recorder {
     this.entries.push({
       funcName,
       args: JSON.stringify(args),
-      result: "",
+      result: '',
       durationMs,
       timestamp: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? error.message : error,
     });
   }
 
@@ -63,10 +63,11 @@ export class Recorder {
     line: number,
     column?: number,
   ): void {
-    if (this.entries.length === 0) return;
+    const last = this.entries[this.entries.length - 1];
+    if (!last) return;
     const sm: SourceMap = { gitSHA, filePath, line };
     if (column !== undefined) sm.column = column;
-    this.entries[this.entries.length - 1].sourceMap = sm;
+    last.sourceMap = sm;
   }
 
   /** Return a copy of all recorded trace entries. */

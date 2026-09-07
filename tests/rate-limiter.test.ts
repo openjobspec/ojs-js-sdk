@@ -126,7 +126,10 @@ describe('HttpTransport rate-limit retry', () => {
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Fully deterministic fake timers (no shouldAdvanceTime): every retry
+    // backoff delay below is driven explicitly via vi.advanceTimersByTimeAsync
+    // / vi.runAllTimersAsync rather than genuinely elapsing wall-clock time.
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
@@ -144,16 +147,45 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { minBackoffMs: 10, maxBackoffMs: 5000 },
     });
 
-    const result = await transport.request<{ job: { id: string } }>({
+    const promise = transport.request<{ job: { id: string } }>({
       method: 'GET',
       path: '/jobs/123',
     });
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result.body.job.id).toBe('123');
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
   });
 
-  it('should respect Retry-After header value', async () => {
+  it('should remove abort listeners after a completed retry delay', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(mockRateLimitResponse('1'))
+      .mockResolvedValueOnce(mockSuccessResponse());
+
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    const transport = new HttpTransport({
+      url: 'http://localhost:8080',
+      retryConfig: { minBackoffMs: 10, maxBackoffMs: 5000 },
+    });
+
+    const promise = transport.request({
+      method: 'GET',
+      path: '/health',
+      signal: controller.signal,
+    });
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const removedListeners = new Set(removeSpy.mock.calls.map((call) => call[1]));
+    for (const [, listener] of addSpy.mock.calls) {
+      expect(removedListeners.has(listener)).toBe(true);
+    }
+  });
+
+  it('should respect Retry-After header value (deterministic — no real 2s wait)', async () => {
     globalThis.fetch = vi.fn()
       .mockResolvedValueOnce(mockRateLimitResponse('2'))
       .mockResolvedValueOnce(mockSuccessResponse());
@@ -163,13 +195,16 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { minBackoffMs: 10 },
     });
 
-    const start = Date.now();
-    await transport.request({ method: 'GET', path: '/health' });
-    const elapsed = Date.now() - start;
+    const promise = transport.request({ method: 'GET', path: '/health' });
 
-    // Retry-After: 2 means 2000ms delay
-    expect(elapsed).toBeGreaterThanOrEqual(1900);
+    // Retry-After: 2 means a 2000ms delay — confirm the retry has NOT fired
+    // one tick early, then confirm it fires at exactly 2000ms.
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
+
+    await promise;
   });
 
   it('should throw after max retries exhausted', async () => {
@@ -181,9 +216,10 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { maxRetries: 2, minBackoffMs: 10, maxBackoffMs: 50 },
     });
 
-    await expect(
-      transport.request({ method: 'GET', path: '/health' }),
-    ).rejects.toBeInstanceOf(OJSRateLimitError);
+    const promise = transport.request({ method: 'GET', path: '/health' });
+    const assertion = expect(promise).rejects.toBeInstanceOf(OJSRateLimitError);
+    await vi.runAllTimersAsync();
+    await assertion;
 
     // 1 initial + 2 retries = 3 total
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(3);
@@ -248,10 +284,12 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { maxRetries: 3, minBackoffMs: 10, maxBackoffMs: 50 },
     });
 
-    const result = await transport.request<{ status: string }>({
+    const promise = transport.request<{ status: string }>({
       method: 'GET',
       path: '/health',
     });
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result.body.status).toBe('ok');
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(3);
@@ -264,7 +302,9 @@ describe('HttpTransport rate-limit retry', () => {
 
     const transport = new HttpTransport({ url: 'http://localhost:8080' });
 
-    await transport.request({ method: 'GET', path: '/health' });
+    const promise = transport.request({ method: 'GET', path: '/health' });
+    await vi.runAllTimersAsync();
+    await promise;
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
   });
 
@@ -278,7 +318,9 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { minBackoffMs: 10, maxBackoffMs: 100 },
     });
 
-    const result = await transport.request({ method: 'GET', path: '/health' });
+    const promise = transport.request({ method: 'GET', path: '/health' });
+    await vi.runAllTimersAsync();
+    const result = await promise;
     expect(result.status).toBe(200);
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
   });
@@ -294,15 +336,75 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { minBackoffMs: 10, maxBackoffMs: 60_000 },
     });
 
-    // Abort after a short delay so the retry sleep is interrupted
-    setTimeout(() => controller.abort(), 50);
+    const promise = transport.request({
+      method: 'GET',
+      path: '/health',
+      signal: controller.signal,
+    });
+    const assertion = expect(promise).rejects.toThrow();
 
-    await expect(
-      transport.request({ method: 'GET', path: '/health', signal: controller.signal }),
-    ).rejects.toThrow();
+    // Let the first attempt resolve (429) and the 10s retry sleep begin,
+    // then abort deterministically — no race against a real competing timer.
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await assertion;
 
     // Only one fetch call — the retry sleep was aborted before the second attempt
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+  });
+
+  it('should reject with an Error even when the AbortSignal is aborted with a non-Error reason', async () => {
+    // Regression test: the retry-sleep rejection previously propagated
+    // `signal.reason` verbatim, which per spec may be any value the caller
+    // passed to controller.abort(reason) — a plain string/object reason
+    // would then violate the Promise<T> rejects-with-Error expectation
+    // relied on elsewhere (e.g. `instanceof Error` checks).
+    globalThis.fetch = vi.fn().mockResolvedValue(mockRateLimitResponse('10'));
+
+    const controller = new AbortController();
+    const transport = new HttpTransport({
+      url: 'http://localhost:8080',
+      retryConfig: { minBackoffMs: 10, maxBackoffMs: 60_000 },
+    });
+
+    const promise = transport.request({
+      method: 'GET',
+      path: '/health',
+      signal: controller.signal,
+    });
+    const assertion = expect(promise).rejects.toBeInstanceOf(Error);
+
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort('a plain string reason, not an Error');
+    await assertion;
+
+    await expect(promise).rejects.toMatchObject({
+      message: 'The operation was aborted',
+      cause: 'a plain string reason, not an Error',
+    });
+  });
+
+  it('should reject with the original Error when the AbortSignal is aborted with an Error reason', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockRateLimitResponse('10'));
+
+    const controller = new AbortController();
+    const transport = new HttpTransport({
+      url: 'http://localhost:8080',
+      retryConfig: { minBackoffMs: 10, maxBackoffMs: 60_000 },
+    });
+
+    const promise = transport.request({
+      method: 'GET',
+      path: '/health',
+      signal: controller.signal,
+    });
+
+    const abortError = new Error('custom shutdown reason');
+    const assertion = expect(promise).rejects.toBe(abortError);
+
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort(abortError);
+    await assertion;
   });
 
   it('should allow partial retry config override', async () => {
@@ -316,7 +418,9 @@ describe('HttpTransport rate-limit retry', () => {
       retryConfig: { maxRetries: 1 },
     });
 
-    await transport.request({ method: 'GET', path: '/health' });
+    const promise = transport.request({ method: 'GET', path: '/health' });
+    await vi.runAllTimersAsync();
+    await promise;
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
   });
 });

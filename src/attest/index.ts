@@ -37,6 +37,7 @@ export type {
 
 import type { AttestInput, AttestResult, Receipt } from './types.js';
 import { QuoteType, SignatureAlgorithm } from './types.js';
+import { getWebCrypto } from '../crypto.js';
 
 // ---------------------------------------------------------------------------
 // Attestor interface
@@ -76,8 +77,11 @@ export class NoneAttestor implements Attestor {
     return 'none';
   }
 
-  async attest(input: AttestInput): Promise<AttestResult> {
-    return {
+  attest(input: AttestInput): Promise<AttestResult> {
+    // Not declared `async` since it never awaits anything — returning
+    // Promise.resolve() directly keeps the (still asynchronous) Promise
+    // contract without the unnecessary async-function overhead.
+    return Promise.resolve({
       quote: {
         type: QuoteType.None,
         evidence: new Uint8Array(0),
@@ -85,11 +89,12 @@ export class NoneAttestor implements Attestor {
         issuedAt: input.timestamp,
       },
       signature: { algorithm: SignatureAlgorithm.Ed25519, value: '', keyId: '' },
-    };
+    });
   }
 
-  async verify(_receipt: Receipt): Promise<void> {
+  verify(_receipt: Receipt): Promise<void> {
     // Always succeeds.
+    return Promise.resolve();
   }
 }
 
@@ -128,7 +133,7 @@ export class PQCOnlyAttestor implements Attestor {
         issuedAt: input.timestamp,
       },
       signature: {
-        algorithm: 'hmac-sha256',
+        algorithm: SignatureAlgorithm.HmacSha256,
         value: hexEncode(sig),
         keyId: this._keyId,
       },
@@ -157,11 +162,12 @@ export class NitroAttestor implements Attestor {
   name(): string {
     return 'aws-nitro';
   }
-  async attest(_input: AttestInput): Promise<AttestResult> {
-    throw new AttestationNotAvailableError();
+  attest(_input: AttestInput): Promise<AttestResult> {
+    // Not declared `async`: always rejects, never awaits.
+    return Promise.reject(new AttestationNotAvailableError());
   }
-  async verify(_receipt: Receipt): Promise<void> {
-    throw new AttestationNotAvailableError();
+  verify(_receipt: Receipt): Promise<void> {
+    return Promise.reject(new AttestationNotAvailableError());
   }
 }
 
@@ -170,11 +176,12 @@ export class TDXAttestor implements Attestor {
   name(): string {
     return 'intel-tdx';
   }
-  async attest(_input: AttestInput): Promise<AttestResult> {
-    throw new AttestationNotAvailableError();
+  attest(_input: AttestInput): Promise<AttestResult> {
+    // Not declared `async`: always rejects, never awaits.
+    return Promise.reject(new AttestationNotAvailableError());
   }
-  async verify(_receipt: Receipt): Promise<void> {
-    throw new AttestationNotAvailableError();
+  verify(_receipt: Receipt): Promise<void> {
+    return Promise.reject(new AttestationNotAvailableError());
   }
 }
 
@@ -183,11 +190,12 @@ export class SEVAttestor implements Attestor {
   name(): string {
     return 'amd-sev-snp';
   }
-  async attest(_input: AttestInput): Promise<AttestResult> {
-    throw new AttestationNotAvailableError();
+  attest(_input: AttestInput): Promise<AttestResult> {
+    // Not declared `async`: always rejects, never awaits.
+    return Promise.reject(new AttestationNotAvailableError());
   }
-  async verify(_receipt: Receipt): Promise<void> {
-    throw new AttestationNotAvailableError();
+  verify(_receipt: Receipt): Promise<void> {
+    return Promise.reject(new AttestationNotAvailableError());
   }
 }
 
@@ -196,6 +204,7 @@ export class SEVAttestor implements Attestor {
 // ---------------------------------------------------------------------------
 
 async function attestDigest(e: AttestInput): Promise<Uint8Array> {
+  const webCrypto = await getWebCrypto();
   const encoder = new TextEncoder();
   const parts = [
     encoder.encode(e.argsHash),
@@ -209,19 +218,20 @@ async function attestDigest(e: AttestInput): Promise<Uint8Array> {
     buf.set(p, offset);
     offset += p.length;
   }
-  const hash = await globalThis.crypto.subtle.digest('SHA-256', buf);
+  const hash = await webCrypto.subtle.digest('SHA-256', buf);
   return new Uint8Array(hash);
 }
 
 async function hmacSign(secret: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
-  const key = await globalThis.crypto.subtle.importKey(
+  const webCrypto = await getWebCrypto();
+  const key = await webCrypto.subtle.importKey(
     'raw',
     secret,
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   );
-  const sig = await globalThis.crypto.subtle.sign('HMAC', key, data);
+  const sig = await webCrypto.subtle.sign('HMAC', key, data);
   return new Uint8Array(sig);
 }
 

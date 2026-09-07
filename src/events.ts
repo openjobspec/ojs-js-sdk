@@ -3,6 +3,7 @@
  */
 
 import type { JobError, JsonValue } from './job.js';
+import { generateUuidV4 } from './uuid.js';
 
 /** All possible OJS event types. */
 export type OJSEventType =
@@ -162,25 +163,41 @@ export class OJSEventEmitter {
 
   /**
    * Emit an event to all matching listeners.
+   *
+   * A throwing/rejecting listener cannot prevent other listeners from
+   * running, and cannot make `emit()` itself reject. Event dispatch is a
+   * side channel: callers such as OJSWorker invoke `emit()` for
+   * observability *after* the operation it describes has already completed
+   * (e.g. after ack() succeeds) — if `emit()` could reject, a broken
+   * `job.completed` listener would incorrectly route an already-acked job
+   * into the failure/nack path. Listener errors are logged instead.
    */
   async emit(event: OJSEvent): Promise<void> {
     const typeListeners = this.listeners.get(event.type);
     const allListeners = this.listeners.get('*');
 
-    const promises: (void | Promise<void>)[] = [];
+    // Start every listener immediately (concurrently) — only *awaiting*
+    // sequentially would serialize otherwise-independent async listeners.
+    const pending: Promise<PromiseSettledResult<void>>[] = [];
 
     if (typeListeners) {
       for (const listener of typeListeners) {
-        promises.push(listener(event));
+        pending.push(runListener(listener, event));
       }
     }
     if (allListeners) {
       for (const listener of allListeners) {
-        promises.push(listener(event));
+        pending.push(runListener(listener, event));
       }
     }
 
-    await Promise.all(promises);
+    const results = await Promise.all(pending);
+
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        console.warn(`[ojs-events] listener for '${event.type}' threw:`, String(result.reason));
+      }
+    }
   }
 
   /** Remove all listeners. */
@@ -197,12 +214,29 @@ export class OJSEventEmitter {
   ): OJSEvent<OJSEventDataMap[E]> {
     return {
       specversion: '1.0',
-      id: `evt_${crypto.randomUUID()}`,
+      id: `evt_${generateUuidV4()}`,
       type,
       source,
       time: new Date().toISOString(),
       subject,
       data,
     };
+  }
+}
+
+/**
+ * Invokes a listener and normalizes both synchronous throws and rejected
+ * promises into a single PromiseSettledResult, so `emit()` can treat every
+ * listener outcome uniformly regardless of whether it is sync or async.
+ */
+async function runListener(
+  listener: OJSEventListener,
+  event: OJSEvent,
+): Promise<PromiseSettledResult<void>> {
+  try {
+    await listener(event);
+    return { status: 'fulfilled', value: undefined };
+  } catch (reason) {
+    return { status: 'rejected', reason };
   }
 }

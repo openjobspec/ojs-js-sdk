@@ -6,6 +6,7 @@ import {
   validateUUIDv7,
   validateTimestamp,
   validateDuration,
+  validateUniquePolicy,
   validateEnqueueRequest,
 } from '../src/validation/schemas.js';
 
@@ -59,6 +60,12 @@ describe('validateQueueName', () => {
     expect(validateQueueName('high-priority')).toBeNull();
     expect(validateQueueName('queue.emails')).toBeNull();
     expect(validateQueueName('0-queue')).toBeNull();
+    expect(validateQueueName('queue--name')).toBeNull();
+    expect(validateQueueName('queue..name')).toBeNull();
+    expect(validateQueueName('queue.-name')).toBeNull();
+    expect(validateQueueName('queue-.name')).toBeNull();
+    expect(validateQueueName('queue.')).toBeNull();
+    expect(validateQueueName('queue-')).toBeNull();
   });
 
   it('rejects empty or non-string values', () => {
@@ -85,21 +92,10 @@ describe('validateQueueName', () => {
     expect(validateQueueName('Default')).not.toBeNull();
   });
 
-  it('rejects names with special characters', () => {
+  it('rejects underscores and other unsupported characters', () => {
+    expect(validateQueueName('queue_name')).not.toBeNull();
     expect(validateQueueName('queue@name')).not.toBeNull();
     expect(validateQueueName('queue name')).not.toBeNull();
-  });
-
-  it('rejects names with trailing separators', () => {
-    expect(validateQueueName('queue.')).not.toBeNull();
-    expect(validateQueueName('queue-')).not.toBeNull();
-  });
-
-  it('rejects names with consecutive separators', () => {
-    expect(validateQueueName('queue..name')).not.toBeNull();
-    expect(validateQueueName('queue--name')).not.toBeNull();
-    expect(validateQueueName('queue.-name')).not.toBeNull();
-    expect(validateQueueName('queue-.name')).not.toBeNull();
   });
 });
 
@@ -190,6 +186,70 @@ describe('validateDuration', () => {
     expect(validateDuration('PT1.5S', 'interval')).toBeNull();
   });
 
+  describe('validateUniquePolicy', () => {
+    it('accepts the canonical schema field names', () => {
+      expect(validateUniquePolicy({
+        keys: ['type', 'args', 'meta'],
+        args_keys: ['id'],
+        meta_keys: ['tenant_id'],
+        period: 'PT1H',
+        states: ['available', 'active'],
+        on_conflict: 'reject',
+      })).toEqual([]);
+    });
+
+    it('rejects the deprecated key alias in canonical wire data', () => {
+      expect(validateUniquePolicy({ key: ['type', 'args'] })).toContainEqual(
+        expect.objectContaining({ field: 'options.unique.key' }),
+      );
+    });
+
+    it('rejects invalid dimensions and meta without meta_keys while allowing empty args_keys', () => {
+      const errors = validateUniquePolicy({
+        keys: ['type', 'argz', 'meta'],
+        args_keys: [],
+      });
+
+      expect(errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ field: 'options.unique.keys' }),
+        expect.objectContaining({ field: 'options.unique.meta_keys' }),
+      ]));
+      expect(errors).not.toContainEqual(
+        expect.objectContaining({ field: 'options.unique.args_keys' }),
+      );
+    });
+
+    it('matches canonical enum, uniqueness, selector, and duration constraints', () => {
+      expect(validateUniquePolicy({
+        keys: [],
+        args_keys: [],
+        states: [],
+        period: 'P1Y2M3W4DT5H6M7.5S',
+        on_conflict: 'ignore',
+      })).toEqual([]);
+
+      const errors = validateUniquePolicy({
+        keys: ['type', 'type'],
+        args_keys: ['id', 'id'],
+        meta_keys: [],
+        states: ['active', 'active', 'bogus'],
+        period: '1 hour',
+        on_conflict: 'explode',
+      });
+
+      for (const field of [
+        'options.unique.keys',
+        'options.unique.args_keys',
+        'options.unique.meta_keys',
+        'options.unique.states',
+        'options.unique.period',
+        'options.unique.on_conflict',
+      ]) {
+        expect(errors).toContainEqual(expect.objectContaining({ field }));
+      }
+    });
+  });
+
   it('rejects empty or non-string values', () => {
     expect(validateDuration('', 'interval')).not.toBeNull();
   });
@@ -223,6 +283,36 @@ describe('validateEnqueueRequest', () => {
       options: { queue: 'high-priority' },
     });
     expect(errors).toEqual([]);
+  });
+
+  it('accepts canonical trailing and consecutive queue separators', () => {
+    for (const queue of ['queue--name', 'queue.', 'queue-']) {
+      expect(validateEnqueueRequest({
+        type: 'email.send',
+        options: { queue },
+      })).toEqual([]);
+    }
+  });
+
+  it('validates canonical unique policy fields inside options', () => {
+    expect(validateEnqueueRequest({
+      type: 'email.send',
+      args: [{ id: 42 }],
+      options: {
+        unique: {
+          keys: ['type', 'args'],
+          args_keys: ['id'],
+        },
+      },
+    })).toEqual([]);
+
+    expect(validateEnqueueRequest({
+      type: 'email.send',
+      args: [{ id: 42 }],
+      options: { unique: { key: ['id'] } },
+    })).toContainEqual(
+      expect.objectContaining({ field: 'options.unique.key' }),
+    );
   });
 
   it('returns error when type is missing', () => {

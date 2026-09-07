@@ -3,12 +3,16 @@ import {
   OJSError,
   OJSValidationError,
   OJSNotFoundError,
+  OJSMethodNotAllowedError,
   OJSDuplicateError,
   OJSConflictError,
   OJSServerError,
   OJSConnectionError,
+  OJSRequestTimeoutError,
   OJSTimeoutError,
   OJSRateLimitError,
+  OJSCheckpointLoadError,
+  ReplayIntegrityError,
   parseErrorResponse,
 } from '../src/errors.js';
 import type { RateLimitInfo } from '../src/errors.js';
@@ -87,6 +91,16 @@ describe('OJSNotFoundError', () => {
     expect(err.details).toEqual({ resource_type: 'job', resource_id: 'abc-123' });
     expect(err.requestId).toBe('req-2');
   });
+
+  describe('OJSMethodNotAllowedError', () => {
+    it('represents HTTP 405 as a non-retryable typed error', () => {
+      const err = new OJSMethodNotAllowedError('Legacy route is disabled');
+      expect(err.name).toBe('OJSMethodNotAllowedError');
+      expect(err.code).toBe('method_not_allowed');
+      expect(err.statusCode).toBe(405);
+      expect(err.retryable).toBe(false);
+    });
+  });
 });
 
 describe('OJSDuplicateError', () => {
@@ -134,6 +148,25 @@ describe('OJSConnectionError', () => {
     expect(err.retryable).toBe(true);
     expect(err.cause).toBe(cause);
   });
+
+  it('accepts structured details', () => {
+    const err = new OJSConnectionError('boom', undefined, { path: '/x' });
+    expect(err.details).toEqual({ path: '/x' });
+  });
+});
+
+describe('OJSRequestTimeoutError', () => {
+  it('is a retryable OJSConnectionError subtype carrying timeout/path details', () => {
+    const err = new OJSRequestTimeoutError(1000, '/jobs/123');
+    expect(err).toBeInstanceOf(OJSConnectionError);
+    expect(err.name).toBe('OJSRequestTimeoutError');
+    expect(err.code).toBe('connection_error');
+    expect(err.retryable).toBe(true);
+    expect(err.timeoutMs).toBe(1000);
+    expect(err.path).toBe('/jobs/123');
+    expect(err.message).toBe("Request to '/jobs/123' timed out after 1000ms.");
+    expect(err.details).toEqual({ timeout_ms: 1000, path: '/jobs/123' });
+  });
 });
 
 describe('OJSTimeoutError', () => {
@@ -144,6 +177,88 @@ describe('OJSTimeoutError', () => {
     expect(err.retryable).toBe(true);
     expect(err.message).toBe("Job 'job-5' exceeded 30000ms timeout.");
     expect(err.details).toEqual({ job_id: 'job-5', timeout_ms: 30000 });
+  });
+});
+
+describe('OJSCheckpointLoadError', () => {
+  it('wraps the original error as cause, mirrors its retryable classification, and includes job/attempt context', () => {
+    const cause = new OJSConnectionError('connection refused');
+    const err = new OJSCheckpointLoadError('job-42', 3, cause);
+
+    expect(err.name).toBe('OJSCheckpointLoadError');
+    expect(err.code).toBe('checkpoint_load_failed');
+    expect(err.jobId).toBe('job-42');
+    expect(err.attempt).toBe(3);
+    expect(err.cause).toBe(cause);
+    // Mirrors the underlying OJSConnectionError's own retryable classification.
+    expect(err.retryable).toBe(true);
+    expect(err.message).toContain('job-42');
+    expect(err.message).toContain('3');
+    expect(err.message).toContain('connection refused');
+    expect(err.details).toEqual({ job_id: 'job-42', attempt: 3 });
+  });
+
+  describe('ReplayIntegrityError', () => {
+    it('reports replay type and key mismatches as non-retryable integrity failures', () => {
+      const err = new ReplayIntegrityError(
+        'job-1',
+        2,
+        3,
+        'call',
+        'call',
+        'expected-key',
+        'actual-key',
+      );
+
+      expect(err.name).toBe('ReplayIntegrityError');
+      expect(err.code).toBe('replay_integrity_error');
+      expect(err.retryable).toBe(false);
+      expect(err.message).toContain('position 3');
+      expect(err.message).toContain('expected-key');
+      expect(err.details).toEqual({
+        job_id: 'job-1',
+        attempt: 2,
+        position: 3,
+        expected_type: 'call',
+        actual_type: 'call',
+        expected_key: 'expected-key',
+        actual_key: 'actual-key',
+      });
+    });
+  });
+
+  it('defaults to retryable when the cause is not an OJSError', () => {
+    const cause = new Error('unexpected failure');
+    const err = new OJSCheckpointLoadError('job-1', 1, cause);
+    expect(err.retryable).toBe(true);
+    expect(err.cause).toBe(cause);
+  });
+
+  it('preserves a non-retryable classification from the underlying cause (e.g. an auth failure)', () => {
+    const cause = new OJSError('Unauthorized', 'unauthorized', { retryable: false });
+    const err = new OJSCheckpointLoadError('job-2', 1, cause);
+    expect(err.retryable).toBe(false);
+  });
+
+  it('wraps a non-Error cause value in an Error before storing it', () => {
+    const err = new OJSCheckpointLoadError('job-3', 1, 'a raw string failure');
+    expect(err.cause).toBeInstanceOf(Error);
+    expect((err.cause as Error).message).toBe('a raw string failure');
+    expect(err.message).toContain('a raw string failure');
+  });
+
+  it('adds legacy source context without losing the original error classification', () => {
+    const cause = new OJSError('Forbidden', 'forbidden', { retryable: false });
+    const err = new OJSCheckpointLoadError('job-legacy', 4, cause, 'legacy');
+
+    expect(err.cause).toBe(cause);
+    expect(err.retryable).toBe(false);
+    expect(err.message).toContain('legacy checkpoint');
+    expect(err.details).toEqual({
+      job_id: 'job-legacy',
+      attempt: 4,
+      checkpoint_source: 'legacy',
+    });
   });
 });
 
@@ -201,6 +316,15 @@ describe('parseErrorResponse', () => {
     const err = parseErrorResponse(404, { error: { message: 'missing' } });
     expect(err).toBeInstanceOf(OJSNotFoundError);
     expect(err.message).toContain('resource');
+  });
+
+  it('returns OJSMethodNotAllowedError for 405', () => {
+    const err = parseErrorResponse(405, {
+      error: { message: 'legacy resume route disabled', request_id: 'r405' },
+    });
+    expect(err).toBeInstanceOf(OJSMethodNotAllowedError);
+    expect(err.message).toBe('legacy resume route disabled');
+    expect(err.requestId).toBe('r405');
   });
 
   it('returns OJSDuplicateError for 409 with duplicate code', () => {

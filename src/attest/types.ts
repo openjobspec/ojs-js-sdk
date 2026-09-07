@@ -20,6 +20,8 @@ export const SignatureAlgorithm = {
   Ed25519: 'ed25519',
   MLDSA65: 'ml-dsa-65',
   HybridEdMLDSA: 'hybrid:Ed25519+ML-DSA-65',
+  /** Used by {@link PQCOnlyAttestor}'s software-only HMAC-SHA256 signatures. */
+  HmacSha256: 'hmac-sha256',
 } as const;
 
 export type SignatureAlgorithmValue =
